@@ -8,5 +8,5 @@ class ScanResult(models.Model):
     result = models.TextField()
 
     def __str__(self):
-        return f"{self.target} - {self.scan_type}"
+        return f"{self.target} - {self.scan_type} ({self.created_at})"
 # Create your models here.
