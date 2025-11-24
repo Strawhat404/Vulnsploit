@@ -1,16 +1,16 @@
 import subprocess
 
-def run_nmap(target):
-
+def run_nmap_scan(target, scan_type):
     try:
-        # -sV → service detection
-        # -T4 → faster scan
-        # -oN - → output normal format to stdout
-        result = subprocess.check_output(
-            ['nmap', '-sV', '-T4', '-oN', '-', target],
-            stderr=subprocess.STDOUT,
-            text=True
-        )
+        if scan_type == "quick":
+            command = ["nmap", "-T4", "-F", target]
+        elif scan_type == "full":
+            command = ["nmap", "-sV", "-p-", target]
+        else:
+            command = ["nmap", target]
+
+        result = subprocess.check_output(command, stderr=subprocess.STDOUT, text=True)
         return result
+
     except subprocess.CalledProcessError as e:
-        return f"An error occurred while running nmap: {e.output}"
+        return f"Error running Nmap: {e.output}"
