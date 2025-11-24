@@ -6,6 +6,9 @@ ENV PYTHONUNBUFFERED=1
 # Set working directory inside the container
 WORKDIR /app
 
+#install system dependencies
+
+RUN apt-get update && apt-get install -y nmap && apt-get clean
 # Copy only requirements first so we can take advantage of Docker cache
 COPY requirements.txt .
 
