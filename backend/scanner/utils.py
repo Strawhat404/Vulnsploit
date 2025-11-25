@@ -1,9 +1,16 @@
 import subprocess
 
-def run_nmap_scan(target, scan_type):
+def run_scan(target, scan_type):
     try:
+        if scan_type == "nikto":
+            command = ["nikto", "-h", target]
+        elif scan_type == "sqlmap":
+            command = ["sqlmap", "-u", target, "--batch"]
+
+        else:
+
         # Define different scan types
-        scan_modes = {
+        nmap_modes = {
             "quick": ["nmap", "-T4", "-F", target],
             "full": ["nmap", "-sV", "-p-", target],
             "os_detection": ["nmap", "-O", target],
@@ -16,7 +23,7 @@ def run_nmap_scan(target, scan_type):
         }
 
         # Default command if unknown scan type
-        command = scan_modes.get(scan_type, ["nmap", target])
+        command = nmap_modes.get(scan_type, ["nmap", target])
 
         # Run command
         result = subprocess.check_output(
@@ -28,4 +35,6 @@ def run_nmap_scan(target, scan_type):
         return result
 
     except subprocess.CalledProcessError as e:
-        return f"Nmap execution error:\n{e.output}"
+        return f"Scan execution error:\n{e.output}"
+    except Exception as e:
+        return f"An unexpected error occurred:{str(e)}"
