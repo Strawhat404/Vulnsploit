@@ -10,3 +10,28 @@ services:
     working_dir: /app
     volumes:
       - ./backend:/app
+    depends_on:
+      - redis #waits for redis to start before starting django
+
+    #the message broker
+
+    redis:
+      image: redis:alpine
+      container_name: vulnsploit-redis
+      ports:
+        - "6379:6379"
+      
+
+    #the worker (Celery)
+    celery:
+      build:
+        context: ./backend
+        dockerfile: Dockerfile
+      container_name: vulnsploit-celery
+      command: celery -A Vulnsploit worker --loglevel=info
+      workind_dir: /app
+      volumes:
+        - ./backend:/app
+      depends_on:
+        - redis
+        - backend
