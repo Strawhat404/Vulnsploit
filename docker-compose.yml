@@ -15,23 +15,23 @@ services:
 
     #the message broker
 
-    redis:
-      image: redis:alpine
-      container_name: vulnsploit-redis
-      ports:
-        - "6379:6379"
+  redis:
+    image: redis:alpine
+    container_name: vulnsploit-redis
+    ports:
+      - "6379:6379"
       
 
     #the worker (Celery)
-    celery:
-      build:
-        context: ./backend
-        dockerfile: Dockerfile
-      container_name: vulnsploit-celery
-      command: celery -A Vulnsploit worker --loglevel=info
-      working_dir: /app
-      volumes:
-        - ./backend:/app
-      depends_on:
-        - redis
-        - backend
+  celery:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vulnsploit-celery
+    command: celery -A Vulnsploit worker --loglevel=info
+    working_dir: /app
+    volumes:
+      - ./backend:/app
+    depends_on:
+      - redis
+      - backend
