@@ -4,3 +4,4 @@ psycopg2-binary
 celery[redis]
 django-cors-headers
 requests
+djangorestframework-simplejwt
