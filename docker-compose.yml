@@ -29,7 +29,7 @@ services:
         dockerfile: Dockerfile
       container_name: vulnsploit-celery
       command: celery -A Vulnsploit worker --loglevel=info
-      workind_dir: /app
+      working_dir: /app
       volumes:
         - ./backend:/app
       depends_on:
