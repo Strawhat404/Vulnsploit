@@ -1,7 +1,7 @@
 import os   
-from celery import celery 
+from celery import Celery 
 
-os.environ.setdefault('Django_SETTINGS_MODULE','vulnsploit.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE','Vulnsploit.settings')
 
 app = Celery('Vulnsploit')
 
