@@ -14,8 +14,8 @@ class ScanResultListCreateView(generics.ListCreateAPIView):
         scan_type = self.request.data.get("scan_type")
 
         # Call our utility function that executes Nmap inside Docker
-       scan_instances =  serializer.save(result="Scan in progress")
-       execute_scan.delay(scan_instances.id,target,scan_type)
+        scan_instances =  serializer.save(result="Scan in progress")
+        execute_scan.delay(scan_instances.id,target,scan_type)
 
        
 
