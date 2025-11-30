@@ -10,27 +10,27 @@ def run_scan(target, scan_type):
         else:
 
         # Define different scan types
-        nmap_modes = {
-            "quick": ["nmap", "-T4", "-F", target],
-            "full": ["nmap", "-sV", "-p-", target],
-            "os_detection": ["nmap", "-O", target],
-            "aggressive": ["nmap", "-A", target],
-            "udp": ["nmap", "-sU", target],
-            "ping_sweep": ["nmap", "-sn", target],
-            "service_version": ["nmap", "-sV", target],
-            "stealth": ["nmap", "-sS", target],
-            "vuln": ["nmap", "--script", "vuln", target],
-        }
+            nmap_modes = {
+                "quick": ["nmap", "-T4", "-F", target],
+                "full": ["nmap", "-sV", "-p-", target],
+                "os_detection": ["nmap", "-O", target],
+                "aggressive": ["nmap", "-A", target],
+                "udp": ["nmap", "-sU", target],
+                "ping_sweep": ["nmap", "-sn", target],
+                "service_version": ["nmap", "-sV", target],
+                "stealth": ["nmap", "-sS", target],
+                "vuln": ["nmap", "--script", "vuln", target],
+            }
 
         # Default command if unknown scan type
-        command = nmap_modes.get(scan_type, ["nmap", target])
+            command = nmap_modes.get(scan_type, ["nmap", target])
 
         # Run command
-        result = subprocess.check_output(
+            result = subprocess.check_output(
             command,
             stderr=subprocess.STDOUT,
             text=True
-        )
+            )
 
         return result
 
