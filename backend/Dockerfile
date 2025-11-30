@@ -8,7 +8,13 @@ WORKDIR /app
 
 #install system dependencies
 
-RUN apt-get update && apt-get install -y nmap && apt-get clean
+RUN apt-get update && apt-get install -y nmap nikto sqlmap wget unzip && apt-get clean
+
+# Install Subfinder
+RUN wget https://github.com/projectdiscovery/subfinder/releases/download/v2.6.6/subfinder_2.6.6_linux_amd64.zip \
+    && unzip subfinder_2.6.6_linux_amd64.zip \
+    && mv subfinder /usr/local/bin/ \
+    && rm subfinder_2.6.6_linux_amd64.zip
 # Copy only requirements first so we can take advantage of Docker cache
 COPY requirements.txt .
 

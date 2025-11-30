@@ -6,6 +6,8 @@ def run_scan(target, scan_type):
             command = ["nikto", "-h", target]
         elif scan_type == "sqlmap":
             command = ["sqlmap", "-u", target, "--batch"]
+        elif scan_type == "subfinder":
+            command = ["subfinder", "-d", target, "-silent"]
 
         else:
 
