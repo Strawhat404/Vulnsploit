@@ -8,7 +8,15 @@ WORKDIR /app
 
 #install system dependencies
 
-RUN apt-get update && apt-get install -y nmap nikto sqlmap wget unzip && apt-get clean
+RUN apt-get update && apt-get install -y nmap wget unzip git && apt-get clean
+
+# Install Nikto (from source)
+RUN git clone https://github.com/sullo/nikto.git /opt/nikto \
+    && ln -s /opt/nikto/program/nikto.pl /usr/local/bin/nikto
+
+# Install SQLMap (from source)
+RUN git clone --depth 1 https://github.com/sqlmapproject/sqlmap.git /opt/sqlmap \
+    && ln -s /opt/sqlmap/sqlmap.py /usr/local/bin/sqlmap
 
 # Install Subfinder
 RUN wget https://github.com/projectdiscovery/subfinder/releases/download/v2.6.6/subfinder_2.6.6_linux_amd64.zip \
