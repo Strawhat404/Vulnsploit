@@ -8,8 +8,12 @@ WORKDIR /app
 
 #install system dependencies
 
+RUN apt-get update && apt-get install -y nmap wget unzip git ruby && apt-get clean
 RUN apt-get update && apt-get install -y nmap wget unzip git && apt-get clean
 
+#Install WhatWeb (from source)
+RUN git clone https://github.com/urbanadventurer/WhatWeb.git /opt/whatweb \
+    && ln -s /opt/whatweb/whatweb /usr/local/bin/whatweb
 # Install Nikto (from source)
 RUN git clone https://github.com/sullo/nikto.git /opt/nikto \
     && ln -s /opt/nikto/program/nikto.pl /usr/local/bin/nikto
@@ -23,6 +27,8 @@ RUN wget https://github.com/projectdiscovery/subfinder/releases/download/v2.6.6/
     && unzip subfinder_2.6.6_linux_amd64.zip \
     && mv subfinder /usr/local/bin/ \
     && rm subfinder_2.6.6_linux_amd64.zip
+
+
 # Copy only requirements first so we can take advantage of Docker cache
 COPY requirements.txt .
 

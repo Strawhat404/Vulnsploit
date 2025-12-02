@@ -8,6 +8,8 @@ def run_scan(target, scan_type):
             command = ["sqlmap", "-u", target, "--batch"]
         elif scan_type == "subfinder":
             command = ["subfinder", "-d", target, "-silent"]
+        elif scan_type == "whatweb":
+            command = ["whatweb". target, "--no-errors", "--color=never"]
 
         else:
 
