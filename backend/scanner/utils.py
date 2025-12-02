@@ -10,6 +10,8 @@ def run_scan(target, scan_type):
             command = ["subfinder", "-d", target, "-silent"]
         elif scan_type == "whatweb":
             command = ["whatweb", target, "--no-errors", "--color=never"]
+        elif scan_type == "gobuster":
+            command = ["gobuster", "dir", "-u", target, "-w", "/usr/share/wordlists/common.txt", "--no-error"]
 
         else:
 

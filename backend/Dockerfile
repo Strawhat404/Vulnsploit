@@ -11,7 +11,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y nmap wget unzip git ruby && apt-get clean
 
 #Install WhatWeb (from source)
-RUN git clone https://github.com/urbanadventurer/WhatWeb.git /opt/whatweb \ && gem install addressable \
+RUN git clone https://github.com/urbanadventurer/WhatWeb.git /opt/whatweb && gem install addressable \
     && ln -s /opt/whatweb/whatweb /usr/local/bin/whatweb
 # Install Nikto (from source)
 RUN git clone https://github.com/sullo/nikto.git /opt/nikto \
@@ -27,6 +27,16 @@ RUN wget https://github.com/projectdiscovery/subfinder/releases/download/v2.6.6/
     && mv subfinder /usr/local/bin/ \
     && rm subfinder_2.6.6_linux_amd64.zip
 
+# Install Gobuster
+RUN wget https://github.com/OJ/gobuster/releases/download/v3.6.0/gobuster_Linux_x86_64.tar.gz \
+    && tar -xzvf gobuster_Linux_x86_64.tar.gz \
+    && mv gobuster /usr/local/bin/ \
+    && rm gobuster_Linux_x86_64.tar.gz
+
+
+# Download Wordlist (SecLists common.txt)
+RUN mkdir -p /usr/share/wordlists \
+    && wget https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt -O /usr/share/wordlists/common.txt
 
 # Copy only requirements first so we can take advantage of Docker cache
 COPY requirements.txt .
