@@ -28,7 +28,7 @@ def run_scan(target, scan_type):
             command = nmap_modes.get(scan_type, ["nmap", target])
 
         # Run command
-            result = subprocess.check_output(
+        result = subprocess.check_output(
             command,
             stderr=subprocess.STDOUT,
             text=True
