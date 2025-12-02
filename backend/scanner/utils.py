@@ -9,7 +9,7 @@ def run_scan(target, scan_type):
         elif scan_type == "subfinder":
             command = ["subfinder", "-d", target, "-silent"]
         elif scan_type == "whatweb":
-            command = ["whatweb". target, "--no-errors", "--color=never"]
+            command = ["whatweb", target, "--no-errors", "--color=never"]
 
         else:
 
