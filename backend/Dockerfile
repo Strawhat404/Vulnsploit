@@ -9,10 +9,9 @@ WORKDIR /app
 #install system dependencies
 
 RUN apt-get update && apt-get install -y nmap wget unzip git ruby && apt-get clean
-RUN apt-get update && apt-get install -y nmap wget unzip git && apt-get clean
 
 #Install WhatWeb (from source)
-RUN git clone https://github.com/urbanadventurer/WhatWeb.git /opt/whatweb \
+RUN git clone https://github.com/urbanadventurer/WhatWeb.git /opt/whatweb \ && gem install addressable \
     && ln -s /opt/whatweb/whatweb /usr/local/bin/whatweb
 # Install Nikto (from source)
 RUN git clone https://github.com/sullo/nikto.git /opt/nikto \
