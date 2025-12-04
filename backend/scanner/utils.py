@@ -12,6 +12,8 @@ def run_scan(target, scan_type):
             command = ["whatweb", target, "--no-errors", "--color=never"]
         elif scan_type == "gobuster":
             command = ["gobuster", "dir", "-u", target, "-w", "/usr/share/wordlists/common.txt", "--no-error"]
+        elif scan_type == "nuclei":
+            command = ["nuclei", "-u", target, "-silent", "-json"]
 
         else:
 
