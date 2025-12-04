@@ -38,6 +38,12 @@ RUN wget https://github.com/OJ/gobuster/releases/download/v3.6.0/gobuster_Linux_
 RUN mkdir -p /usr/share/wordlists \
     && wget https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt -O /usr/share/wordlists/common.txt
 
+# Install Nuclei
+RUN wget https://github.com/projectdiscovery/nuclei/releases/download/v3.2.9/nuclei_3.2.9_linux_amd64.zip \
+    && unzip nuclei_3.2.9_linux_amd64.zip \
+    && mv nuclei /usr/local/bin/ \
+    && rm nuclei_3.2.9_linux_amd64.zip
+
 # Copy only requirements first so we can take advantage of Docker cache
 COPY requirements.txt .
 
