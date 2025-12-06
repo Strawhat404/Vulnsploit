@@ -40,7 +40,7 @@ RUN mkdir -p /usr/share/wordlists \
 
 # Install Nuclei
 RUN wget https://github.com/projectdiscovery/nuclei/releases/download/v3.2.9/nuclei_3.2.9_linux_amd64.zip \
-    && unzip nuclei_3.2.9_linux_amd64.zip \
+    && unzip -o nuclei_3.2.9_linux_amd64.zip \
     && mv nuclei /usr/local/bin/ \
     && rm nuclei_3.2.9_linux_amd64.zip
 
