@@ -13,7 +13,7 @@ def run_scan(target, scan_type):
         elif scan_type == "gobuster":
             command = ["gobuster", "dir", "-u", target, "-w", "/usr/share/wordlists/common.txt", "--no-error"]
         elif scan_type == "nuclei":
-            command = ["nuclei", "-u", target, "-silent", "-json"]
+            command = ["nuclei", "-u", target, "-silent", "-json1"]
 
         else:
 
