@@ -46,7 +46,7 @@ RUN wget https://github.com/projectdiscovery/nuclei/releases/download/v3.2.9/nuc
 
 
 #install WPSCan
-Run gem install wpscan
+RUN gem install wpscan
 # Copy only requirements first so we can take advantage of Docker cache
 COPY requirements.txt .
 
