@@ -8,7 +8,7 @@ WORKDIR /app
 
 #install system dependencies
 
-RUN apt-get update && apt-get install -y nmap wget unzip git ruby && apt-get clean
+RUN apt-get update && apt-get install -y nmap wget unzip git ruby build-essential libcurl4-openssl-dev && apt-get clean
 
 #Install WhatWeb (from source)
 RUN git clone https://github.com/urbanadventurer/WhatWeb.git /opt/whatweb && gem install addressable \
@@ -44,6 +44,9 @@ RUN wget https://github.com/projectdiscovery/nuclei/releases/download/v3.2.9/nuc
     && mv nuclei /usr/local/bin/ \
     && rm nuclei_3.2.9_linux_amd64.zip
 
+
+#install WPSCan
+Run gem install wpscan
 # Copy only requirements first so we can take advantage of Docker cache
 COPY requirements.txt .
 
