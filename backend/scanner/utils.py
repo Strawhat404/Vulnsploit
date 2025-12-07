@@ -14,6 +14,8 @@ def run_scan(target, scan_type):
             command = ["gobuster", "dir", "-u", target, "-w", "/usr/share/wordlists/common.txt", "--no-error"]
         elif scan_type == "nuclei":
             command = ["nuclei", "-u", target, "-silent", "-jsonl"]
+        elif scan_type == "wpscan":
+            command = ["wpscan", "--url", target, "--no-update", "--format", "json", "--disable-tls-checks",]
 
         else:
 
