@@ -10,7 +10,10 @@ def run_scan(target, scan_type):
                 "--forms",
                 "--crawl=2",
                 "--smart",
-                "--random-agent",]
+                "--random-agent",
+                "--lelv=1",
+                "--risk=1"
+            ]
         elif scan_type == "subfinder":
             command = ["subfinder", "-d", target, "-silent"]
         elif scan_type == "whatweb":
