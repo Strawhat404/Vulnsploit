@@ -11,7 +11,7 @@ def run_scan(target, scan_type):
                 "--crawl=2",
                 "--smart",
                 "--random-agent",
-                "--lelv=1",
+                "--level=1",
                 "--risk=1"
             ]
         elif scan_type == "subfinder":
