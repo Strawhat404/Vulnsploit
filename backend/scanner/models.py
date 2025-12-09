@@ -6,6 +6,7 @@ class ScanResult(models.Model):
     url = models.CharField(max_length=255, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     result = models.TextField(blank=True, null=True)
+    result_json = models.JSONField(blank=True, null=True)
 
     def __str__(self):
         return f"{self.target} - {self.scan_type} ({self.created_at})"
