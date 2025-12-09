@@ -5,7 +5,12 @@ def run_scan(target, scan_type):
         if scan_type == "nikto":
             command = ["nikto", "-h", target]
         elif scan_type == "sqlmap":
-            command = ["sqlmap", "-u", target, "--batch"]
+            command = ["sqlmap", "-u", target,
+                "--batch",
+                "--forms",
+                "--crawl=2",
+                "--smart",
+                "--random-agent",]
         elif scan_type == "subfinder":
             command = ["subfinder", "-d", target, "-silent"]
         elif scan_type == "whatweb":
