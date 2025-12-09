@@ -51,7 +51,22 @@ def run_scan(target, scan_type):
             text=True
             )
 
-        return result
+            json_result == None
+
+            if scan_type = "nuclei":
+
+                #Nuclie returns JSON lines so we need to parse it
+                json_result = [json.loads(line) for line in result.splitlines() if line.strip()]
+
+            elif scan_type = "wpscan":
+
+                #wpscan returns one big JSON object
+                try:
+                    json_result = json.loads(result)
+                except json.JSONDecodeError:
+                    pass  #fallback if it's not valid json
+
+            return result, json_result  #<--- Return BOTH
 
     except subprocess.CalledProcessError as e:
         return f"Scan execution error:\n{e.output}"
