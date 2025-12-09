@@ -1,4 +1,5 @@
 import subprocess
+import json
 
 def run_scan(target, scan_type):
     try:
