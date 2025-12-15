@@ -17,7 +17,7 @@ RUN git clone https://github.com/urbanadventurer/WhatWeb.git /opt/whatweb && gem
 RUN git clone https://github.com/sullo/nikto.git /opt/nikto \
     && ln -s /opt/nikto/program/nikto.pl /usr/local/bin/nikto
 
-# Install SQLMap (from source)
+# Install SQLMap (from source) 
 RUN git clone --depth 1 https://github.com/sqlmapproject/sqlmap.git /opt/sqlmap \
     && ln -s /opt/sqlmap/sqlmap.py /usr/local/bin/sqlmap
 
