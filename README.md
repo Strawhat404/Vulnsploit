@@ -11,23 +11,23 @@
 
 ---
 
-## 🚀 Key Features
+##   Key Features
 
 ### 🔧 Multi-Tool Integration
 VulnSploit wraps and orchestrates a comprehensive suite of offensive security tools:
 
-### ⚡ Performance & Architecture
+###   Performance & Architecture
 *   **Asynchronous Execution**: Long-running scans are offloaded to **Celery** workers backed by **Redis**, ensuring a non-blocking, responsive API.
 *   **Dockerized Deployment**: Fully containerized services (Backend, Worker, Broker) for consistent deployment across environments.
 *   **Scalable**: Easily scale worker nodes to handle multiple concurrent scans.
 
-### 🔒 Security
+###  Security
 *   **JWT Authentication**: Secure API access using JSON Web Tokens (SimpleJWT).
 *   **Input Validation**: Strict validation of targets and parameters to prevent command injection.
 
 ---
 
-## 🛠️ Technology Stack
+##   Technology Stack
 
 *   **Backend Framework**: Django 5 + Django REST Framework (DRF)
 *   **Task Queue**: Celery 5
@@ -37,7 +37,7 @@ VulnSploit wraps and orchestrates a comprehensive suite of offensive security to
 
 ---
 
-## 🏁 Getting Started
+##   Getting Started
 
 ### Prerequisites
 *   Docker & Docker Compose installed on your machine.
@@ -63,7 +63,7 @@ VulnSploit wraps and orchestrates a comprehensive suite of offensive security to
 
 ---
 
-## 📖 API Usage
+##   API Usage
 
 ### 1. Authentication
 Obtain your access token to interact with the API.
@@ -116,10 +116,10 @@ Get the output of a completed scan.
 ---
 
 
-## 🤝 Contributing
+##   Contributing
 
 Contributions are welcome! Please fork the repository and submit a Pull Request.
 
-## 📄 License
+##   License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
