@@ -1,4 +1,4 @@
-# 🛡️ VulnSploit
+#  VulnSploit
 ### Advanced Modular Vulnerability Scanning Engine
 
 ![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
