@@ -13,7 +13,7 @@
 
 ##   Key Features
 
-### 🔧 Multi-Tool Integration
+###   Multi-Tool Integration
 VulnSploit wraps and orchestrates a comprehensive suite of offensive security tools:
 
 ###   Performance & Architecture
