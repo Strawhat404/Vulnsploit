@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  /* ── Page setup ── */
+  @page {
+    size: A4;
+    margin: 20mm 15mm 25mm 15mm;
+
+    @bottom-center {
+      content: "CONFIDENTIAL — VulnSploit Security Assessment — Authorized Use Only";
+      font-family: 'DejaVu Sans', sans-serif;
+      font-size: 8pt;
+      color: #888;
+    }
+    @bottom-right {
+      content: "Page " counter(page) " of " counter(pages);
+      font-family: 'DejaVu Sans', sans-serif;
+      font-size: 8pt;
+      color: #888;
+    }
+  }
+
+  /* ── Watermark on every page ── */
+  @page {
+    background-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='600' height='800'><text x='50%' y='50%' font-family='DejaVu Sans' font-size='72' fill='rgba(0,0,0,0.04)' text-anchor='middle' dominant-baseline='middle' transform='rotate(-45 300 400)'>CONFIDENTIAL</text></svg>");
+    background-repeat: no-repeat;
+    background-position: center;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'DejaVu Sans', sans-serif;
+    font-size: 10pt;
+    color: #1a1a2e;
+    line-height: 1.5;
+  }
+
+  /* ── Cover page ── */
+  .cover {
+    page-break-after: always;
+    min-height: 250mm;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 20mm 10mm;
+    background: linear-gradient(135deg, #0f0f23 0%, #1a1a3e 100%);
+    color: white;
+  }
+
+  .cover-logo {
+    font-size: 36pt;
+    font-weight: bold;
+    letter-spacing: 4px;
+    margin-bottom: 5mm;
+  }
+  .cover-logo span { color: #3b82f6; }
+
+  .cover-subtitle {
+    font-size: 12pt;
+    color: #94a3b8;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    margin-bottom: 20mm;
+  }
+
+  .cover-divider {
+    width: 60mm;
+    height: 2px;
+    background: #3b82f6;
+    margin-bottom: 15mm;
+  }
+
+  .cover-target-label {
+    font-size: 9pt;
+    color: #64748b;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 3mm;
+  }
+
+  .cover-target {
+    font-size: 20pt;
+    font-weight: bold;
+    color: #e2e8f0;
+    margin-bottom: 15mm;
+    word-break: break-all;
+  }
+
+  .cover-meta {
+    display: flex;
+    gap: 20mm;
+    margin-bottom: 20mm;
+  }
+
+  .cover-meta-item label {
+    display: block;
+    font-size: 8pt;
+    color: #64748b;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 2mm;
+  }
+
+  .cover-meta-item span {
+    font-size: 11pt;
+    color: #e2e8f0;
+  }
+
+  .cover-risk {
+    display: inline-block;
+    padding: 3mm 8mm;
+    border-radius: 4px;
+    font-size: 14pt;
+    font-weight: bold;
+    letter-spacing: 2px;
+  }
+  .risk-critical { background: #7f1d1d; color: #fca5a5; }
+  .risk-high     { background: #7c2d12; color: #fdba74; }
+  .risk-medium   { background: #713f12; color: #fde68a; }
+  .risk-low      { background: #14532d; color: #86efac; }
+
+  .cover-footer {
+    margin-top: auto;
+    padding-top: 10mm;
+    border-top: 1px solid #334155;
+    font-size: 8pt;
+    color: #475569;
+  }
+
+  /* ── Section pages ── */
+  .section { page-break-before: always; }
+
+  .section-header {
+    background: #1e293b;
+    color: white;
+    padding: 5mm 8mm;
+    margin-bottom: 8mm;
+    border-left: 4px solid #3b82f6;
+  }
+
+  .section-header h2 {
+    font-size: 14pt;
+    letter-spacing: 1px;
+  }
+
+  .section-header p {
+    font-size: 9pt;
+    color: #94a3b8;
+    margin-top: 1mm;
+  }
+
+  /* ── Executive summary ── */
+  .exec-summary {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    padding: 6mm;
+    margin-bottom: 8mm;
+    font-size: 10pt;
+    line-height: 1.7;
+    color: #334155;
+  }
+
+  /* ── Severity summary table ── */
+  .severity-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 8mm;
+  }
+
+  .severity-table th {
+    background: #1e293b;
+    color: white;
+    padding: 3mm 5mm;
+    text-align: left;
+    font-size: 9pt;
+    letter-spacing: 1px;
+  }
+
+  .severity-table td {
+    padding: 3mm 5mm;
+    border-bottom: 1px solid #e2e8f0;
+    font-size: 10pt;
+  }
+
+  .severity-table tr:nth-child(even) td { background: #f8fafc; }
+
+  .badge {
+    display: inline-block;
+    padding: 1mm 3mm;
+    border-radius: 3px;
+    font-size: 8pt;
+    font-weight: bold;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  .badge-critical { background: #fee2e2; color: #991b1b; }
+  .badge-high     { background: #ffedd5; color: #9a3412; }
+  .badge-medium   { background: #fef9c3; color: #854d0e; }
+  .badge-low      { background: #dcfce7; color: #166534; }
+  .badge-info     { background: #dbeafe; color: #1e40af; }
+
+  /* ── Finding cards ── */
+  .finding {
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    margin-bottom: 6mm;
+    overflow: hidden;
+    page-break-inside: avoid;
+  }
+
+  .finding-header {
+    padding: 4mm 6mm;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .finding-header-critical { background: #fee2e2; border-left: 4px solid #dc2626; }
+  .finding-header-high     { background: #ffedd5; border-left: 4px solid #ea580c; }
+  .finding-header-medium   { background: #fef9c3; border-left: 4px solid #ca8a04; }
+  .finding-header-low      { background: #dcfce7; border-left: 4px solid #16a34a; }
+  .finding-header-info     { background: #dbeafe; border-left: 4px solid #2563eb; }
+
+  .finding-title {
+    font-size: 11pt;
+    font-weight: bold;
+    color: #1e293b;
+  }
+
+  .finding-tool {
+    font-size: 8pt;
+    color: #64748b;
+    background: white;
+    padding: 1mm 3mm;
+    border-radius: 3px;
+    border: 1px solid #e2e8f0;
+  }
+
+  .finding-body {
+    padding: 5mm 6mm;
+    background: white;
+  }
+
+  .finding-field {
+    margin-bottom: 4mm;
+  }
+
+  .finding-field-label {
+    font-size: 8pt;
+    font-weight: bold;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 1mm;
+  }
+
+  .finding-field-value {
+    font-size: 10pt;
+    color: #334155;
+    line-height: 1.6;
+  }
+
+  .evidence-box {
+    background: #0f172a;
+    color: #94a3b8;
+    font-family: 'DejaVu Sans Mono', monospace;
+    font-size: 8pt;
+    padding: 3mm 4mm;
+    border-radius: 3px;
+    word-break: break-all;
+    white-space: pre-wrap;
+  }
+
+  /* ── Scope table ── */
+  .scope-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 6mm;
+  }
+  .scope-table th {
+    background: #1e293b;
+    color: white;
+    padding: 3mm 5mm;
+    text-align: left;
+    font-size: 9pt;
+  }
+  .scope-table td {
+    padding: 3mm 5mm;
+    border-bottom: 1px solid #e2e8f0;
+    font-size: 9pt;
+  }
+
+  /* ── Appendix ── */
+  .appendix-tool {
+    margin-bottom: 8mm;
+    page-break-inside: avoid;
+  }
+  .appendix-tool-header {
+    background: #334155;
+    color: white;
+    padding: 2mm 5mm;
+    font-size: 9pt;
+    font-weight: bold;
+    letter-spacing: 1px;
+  }
+  .appendix-raw {
+    background: #0f172a;
+    color: #94a3b8;
+    font-family: 'DejaVu Sans Mono', monospace;
+    font-size: 7pt;
+    padding: 4mm;
+    max-height: 80mm;
+    overflow: hidden;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
+  /* ── Utility ── */
+  .text-muted { color: #64748b; }
+  .mt-4 { margin-top: 4mm; }
+  .mb-4 { margin-bottom: 4mm; }
+  .no-findings {
+    text-align: center;
+    padding: 15mm;
+    color: #64748b;
+    font-size: 11pt;
+  }
+</style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════════════════════
+     COVER PAGE
+══════════════════════════════════════════════════════════════ -->
+<div class="cover">
+  <div class="cover-logo">VULN<span>SPLOIT</span></div>
+  <div class="cover-subtitle">Security Assessment Report</div>
+  <div class="cover-divider"></div>
+
+  <div class="cover-target-label">Target</div>
+  <div class="cover-target">{{ target }}</div>
+
+  <div class="cover-meta">
+    <div class="cover-meta-item">
+      <label>Date</label>
+      <span>{{ date }}</span>
+    </div>
+    <div class="cover-meta-item">
+      <label>Assessor</label>
+      <span>{{ assessor }}</span>
+    </div>
+    <div class="cover-meta-item">
+      <label>Report ID</label>
+      <span>#{{ report_id }}</span>
+    </div>
+  </div>
+
+  <div>
+    <div class="cover-target-label" style="margin-bottom:3mm;">Overall Risk Level</div>
+    <div class="cover-risk risk-{{ risk_level|lower }}">{{ risk_level }}</div>
+  </div>
+
+  <div class="cover-footer">
+    This report is confidential and intended solely for the authorized recipient.
+    Unauthorized disclosure is strictly prohibited.
+    VulnSploit — For authorized penetration testing only.
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════════════════════════════
+     EXECUTIVE SUMMARY
+══════════════════════════════════════════════════════════════ -->
+<div class="section">
+  <div class="section-header">
+    <h2>Executive Summary</h2>
+    <p>High-level overview of findings and risk posture</p>
+  </div>
+
+  <div class="exec-summary">{{ executive_summary }}</div>
+
+  <table class="severity-table">
+    <thead>
+      <tr>
+        <th>Severity</th>
+        <th>Count</th>
+        <th>Description</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><span class="badge badge-critical">Critical</span></td>
+        <td><strong>{{ severity_counts.critical }}</strong></td>
+        <td>Immediate action required. High likelihood of exploitation.</td>
+      </tr>
+      <tr>
+        <td><span class="badge badge-high">High</span></td>
+        <td><strong>{{ severity_counts.high }}</strong></td>
+        <td>Significant risk. Should be remediated promptly.</td>
+      </tr>
+      <tr>
+        <td><span class="badge badge-medium">Medium</span></td>
+        <td><strong>{{ severity_counts.medium }}</strong></td>
+        <td>Moderate risk. Remediate as part of regular security cycle.</td>
+      </tr>
+      <tr>
+        <td><span class="badge badge-low">Low</span></td>
+        <td><strong>{{ severity_counts.low }}</strong></td>
+        <td>Limited risk. Address during routine hardening.</td>
+      </tr>
+      <tr>
+        <td><span class="badge badge-info">Info</span></td>
+        <td><strong>{{ severity_counts.info }}</strong></td>
+        <td>Informational findings for awareness.</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+
+<!-- ══════════════════════════════════════════════════════════════
+     SCOPE & METHODOLOGY
+══════════════════════════════════════════════════════════════ -->
+<div class="section">
+  <div class="section-header">
+    <h2>Scope &amp; Methodology</h2>
+    <p>Tools and techniques used in this assessment</p>
+  </div>
+
+  <table class="scope-table">
+    <thead>
+      <tr>
+        <th>Tool</th>
+        <th>Category</th>
+        <th>Purpose</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for tool in tools_used %}
+      <tr>
+        <td><strong>{{ tool.name }}</strong></td>
+        <td>{{ tool.category }}</td>
+        <td>{{ tool.purpose }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="exec-summary mt-4">
+    <strong>Disclaimer:</strong> This assessment was conducted with explicit authorization.
+    All testing was performed in a controlled manner to minimize impact on production systems.
+    Results reflect the security posture at the time of testing and may change as the
+    environment evolves.
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════════════════════════════
+     FINDINGS
+══════════════════════════════════════════════════════════════ -->
+<div class="section">
+  <div class="section-header">
+    <h2>Detailed Findings</h2>
+    <p>{{ total_findings }} finding(s) identified — sorted by severity</p>
+  </div>
+
+  {% if findings %}
+    {% for finding in findings %}
+    <div class="finding">
+      <div class="finding-header finding-header-{{ finding.severity }}">
+        <div class="finding-title">{{ finding.title }}</div>
+        <div style="display:flex; gap:3mm; align-items:center;">
+          <span class="badge badge-{{ finding.severity }}">{{ finding.severity }}</span>
+          <span class="finding-tool">{{ finding.tool }}</span>
+        </div>
+      </div>
+      <div class="finding-body">
+        <div class="finding-field">
+          <div class="finding-field-label">Description</div>
+          <div class="finding-field-value">{{ finding.description }}</div>
+        </div>
+        <div class="finding-field">
+          <div class="finding-field-label">Impact</div>
+          <div class="finding-field-value">{{ finding.impact }}</div>
+        </div>
+        <div class="finding-field">
+          <div class="finding-field-label">Recommendation</div>
+          <div class="finding-field-value">{{ finding.recommendation }}</div>
+        </div>
+        <div class="finding-field">
+          <div class="finding-field-label">Evidence</div>
+          <div class="evidence-box">{{ finding.evidence }}</div>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  {% else %}
+    <div class="no-findings">
+      ✓ No significant vulnerabilities identified for this target.
+    </div>
+  {% endif %}
+</div>
+
+
+<!-- ══════════════════════════════════════════════════════════════
+     APPENDIX — RAW OUTPUT
+══════════════════════════════════════════════════════════════ -->
+<div class="section">
+  <div class="section-header">
+    <h2>Appendix — Raw Tool Output</h2>
+    <p>Unprocessed output from each scanning tool</p>
+  </div>
+
+  {% for raw in raw_outputs %}
+  <div class="appendix-tool">
+    <div class="appendix-tool-header">{{ raw.tool | upper }} — {{ raw.scan_type }}</div>
+    <div class="appendix-raw">{{ raw.output[:3000] }}{% if raw.output|length > 3000 %}
+... [truncated — full output available in the system] ...{% endif %}</div>
+  </div>
+  {% endfor %}
+</div>
+
+</body>
+</html>

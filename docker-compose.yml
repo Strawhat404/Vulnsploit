@@ -1,37 +1,55 @@
 services:
+
+  # ─── Redis (message broker) ────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: vulnsploit-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Django backend ────────────────────────────────────────────────────────
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: vulnsploit-backend
-    command: python manage.py runserver 0.0.0.0:8000
+    restart: unless-stopped
+    # Run migrations first, then start the dev server
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             python manage.py runserver 0.0.0.0:8000"
     ports:
-      - "8000:8000"
+      - "8001:8000"   # changed from 8000 to avoid conflict with other projects
     working_dir: /app
     volumes:
-      - ./backend:/app
+      - ./backend:/app    # live code reload in dev
+    env_file:
+      - ./backend/.env    # loads SECRET_KEY, DEBUG, ALLOWED_HOSTS, etc.
     depends_on:
-      - redis #waits for redis to start before starting django
+      redis:
+        condition: service_healthy
 
-    #the message broker
-
-  redis:
-    image: redis:alpine
-    container_name: vulnsploit-redis
-    ports:
-      - "6379:6379"
-      
-
-    #the worker (Celery)
+  # ─── Celery worker ─────────────────────────────────────────────────────────
   celery:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: vulnsploit-celery
-    command: celery -A Vulnsploit worker --loglevel=info
+    restart: unless-stopped
+    command: celery -A Vulnsploit worker --loglevel=info --concurrency=2
     working_dir: /app
     volumes:
       - ./backend:/app
+    env_file:
+      - ./backend/.env
     depends_on:
-      - redis
-      - backend
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_started

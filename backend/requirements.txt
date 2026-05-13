@@ -5,3 +5,10 @@ celery[redis]
 django-cors-headers
 requests
 djangorestframework-simplejwt
+python-decouple==3.8
+django-ratelimit==4.1.0
+# Report generation
+weasyprint==62.3
+Jinja2==3.1.4
+# AI interpretation
+openai==1.30.1

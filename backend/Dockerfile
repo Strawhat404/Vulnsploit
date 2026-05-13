@@ -8,7 +8,12 @@ WORKDIR /app
 
 #install system dependencies
 
-RUN apt-get update && apt-get install -y nmap wget unzip git ruby ruby-dev build-essential libcurl4-openssl-dev && apt-get clean
+RUN apt-get update && apt-get install -y \
+    nmap wget unzip git ruby ruby-dev build-essential libcurl4-openssl-dev \
+    libpango-1.0-0 libpangoft2-1.0-0 libpangocairo-1.0-0 \
+    libcairo2 libffi-dev shared-mime-info \
+    fonts-liberation fonts-dejavu-core \
+    && apt-get clean
 
 #Install WhatWeb (from source)
 RUN git clone https://github.com/urbanadventurer/WhatWeb.git /opt/whatweb && gem install addressable \
