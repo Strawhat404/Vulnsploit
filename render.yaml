@@ -1,0 +1,126 @@
+# render.yaml — Render.com infrastructure-as-code
+# Deploy the entire VulnSploit backend stack with one click.
+# Docs: https://render.com/docs/blueprint-spec
+
+services:
+
+  # ─── Django API (Web Service) ──────────────────────────────────────────────
+  - type: web
+    name: vulnsploit-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: starter          # upgrade to standard for production
+    healthCheckPath: /api/health/
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true          # Render auto-generates a secure random value
+      - key: DEBUG
+        value: "False"
+      - key: ALLOWED_HOSTS
+        value: ".onrender.com,localhost"
+      - key: CORS_ALLOWED_ORIGINS
+        value: "https://your-frontend.vercel.app,https://your-frontend.netlify.app"
+        # ↑ Replace with your actual frontend URL after deploying frontend
+      - key: DB_ENGINE
+        value: django.db.backends.postgresql
+      - key: DB_NAME
+        fromDatabase:
+          name: vulnsploit-db
+          property: database
+      - key: DB_USER
+        fromDatabase:
+          name: vulnsploit-db
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: vulnsploit-db
+          property: password
+      - key: DB_HOST
+        fromDatabase:
+          name: vulnsploit-db
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: vulnsploit-db
+          property: port
+      - key: CELERY_BROKER_URL
+        fromService:
+          name: vulnsploit-redis
+          type: redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          name: vulnsploit-redis
+          type: redis
+          property: connectionString
+      - key: GEMINI_API_KEY
+        sync: false        # Set this manually in Render dashboard — never commit API keys
+      - key: SECURE_SSL_REDIRECT
+        value: "False"     # Render handles SSL at load balancer — keep this False
+
+  # ─── Celery Worker (Background Worker) ────────────────────────────────────
+  - type: worker
+    name: vulnsploit-celery
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: starter
+    # Override the default CMD to run Celery instead of gunicorn
+    dockerCommand: celery -A Vulnsploit worker --loglevel=info --concurrency=2
+    envVars:
+      - key: SECRET_KEY
+        fromService:
+          name: vulnsploit-api
+          type: web
+          envVarKey: SECRET_KEY
+      - key: DEBUG
+        value: "False"
+      - key: DB_ENGINE
+        value: django.db.backends.postgresql
+      - key: DB_NAME
+        fromDatabase:
+          name: vulnsploit-db
+          property: database
+      - key: DB_USER
+        fromDatabase:
+          name: vulnsploit-db
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: vulnsploit-db
+          property: password
+      - key: DB_HOST
+        fromDatabase:
+          name: vulnsploit-db
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: vulnsploit-db
+          property: port
+      - key: CELERY_BROKER_URL
+        fromService:
+          name: vulnsploit-redis
+          type: redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          name: vulnsploit-redis
+          type: redis
+          property: connectionString
+      - key: GEMINI_API_KEY
+        fromService:
+          name: vulnsploit-api
+          type: web
+          envVarKey: GEMINI_API_KEY
+
+  # ─── Redis ─────────────────────────────────────────────────────────────────
+  - type: redis
+    name: vulnsploit-redis
+    plan: starter          # free 25MB Redis on Render
+    maxmemoryPolicy: noeviction
+
+# ─── PostgreSQL Database ────────────────────────────────────────────────────
+databases:
+  - name: vulnsploit-db
+    plan: starter          # free 1GB PostgreSQL on Render

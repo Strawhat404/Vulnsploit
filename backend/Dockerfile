@@ -63,5 +63,11 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 # Copy the rest of the backend source into the container
 COPY . .
 
-# Default command when container starts (we'll override in docker-compose)
-CMD ["sh", "-c", "python manage.py migrate --noinput && python manage.py runserver 0.0.0.0:8000"]
+# Collect static files for WhiteNoise (production)
+RUN python manage.py collectstatic --noinput || true
+
+# Expose the port Render/Railway will route to
+EXPOSE 8000
+
+# Default command — gunicorn for production, overridden in docker-compose for dev
+CMD ["sh", "-c", "python manage.py migrate --noinput && gunicorn Vulnsploit.wsgi:application --bind 0.0.0.0:8000 --workers 2 --timeout 120"]

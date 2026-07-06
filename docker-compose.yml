@@ -20,7 +20,7 @@ services:
       dockerfile: Dockerfile
     container_name: vulnsploit-backend
     restart: unless-stopped
-    # Run migrations first, then start the dev server
+    # Override the production CMD — use Django dev server locally for hot reload
     command: >
       sh -c "python manage.py migrate --noinput &&
              python manage.py runserver 0.0.0.0:8000"

@@ -41,3 +41,8 @@ ENV/
 *.swp
 *.swo
 .DS_Store
+
+# ─── Internal planning docs — never commit ─────────────────────
+/AUDIT_REPORT.md
+/IMPLEMENTATION_PLAN.md
+/DEPLOY.md

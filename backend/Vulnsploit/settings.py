@@ -19,8 +19,11 @@ DEBUG = config('DEBUG', default=False, cast=bool)
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost,127.0.0.1', cast=Csv())
 
 # HTTPS security headers — active when DEBUG=False
+# NOTE: SECURE_SSL_REDIRECT is intentionally OFF because platforms like Render
+# and Railway terminate SSL at the load balancer. The app itself receives plain
+# HTTP internally. Setting this True on those platforms causes redirect loops.
 if not DEBUG:
-    SECURE_SSL_REDIRECT          = True
+    SECURE_SSL_REDIRECT          = config('SECURE_SSL_REDIRECT', default=False, cast=bool)
     SECURE_HSTS_SECONDS          = 31536000   # 1 year
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD          = True
@@ -29,6 +32,8 @@ if not DEBUG:
     SECURE_BROWSER_XSS_FILTER    = True
     SECURE_CONTENT_TYPE_NOSNIFF  = True
     X_FRAME_OPTIONS              = 'DENY'
+    # Trust Render/Railway/Heroku's X-Forwarded-Proto header
+    SECURE_PROXY_SSL_HEADER      = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 
 # ─── APPLICATIONS ──────────────────────────────────────────────────────────────
@@ -48,6 +53,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',      # Serve static files on Render/prod
     'corsheaders.middleware.CorsMiddleware',          # Must be before CommonMiddleware
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -134,7 +140,9 @@ USE_TZ        = True
 
 # ─── STATIC FILES ──────────────────────────────────────────────────────────────
 
-STATIC_URL = 'static/'
+STATIC_URL  = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'   # collectstatic writes here
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Media files (uploaded reports, etc.)
@@ -185,8 +193,8 @@ REST_FRAMEWORK = {
 SCAN_RATE_LIMIT  = config('SCAN_RATE_LIMIT',  default='20/h')
 LOGIN_RATE_LIMIT = config('LOGIN_RATE_LIMIT', default='10/15m')
 
-# OpenAI API key for AI-powered report interpretation
-OPENAI_API_KEY = config('OPENAI_API_KEY', default=None)
+# Gemini API key for AI-powered report interpretation (free tier)
+GEMINI_API_KEY = config('GEMINI_API_KEY', default=None)
 
 # django-ratelimit cache backend
 RATELIMIT_USE_CACHE = 'default'
