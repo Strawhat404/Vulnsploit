@@ -66,8 +66,14 @@ COPY . .
 # Collect static files for WhiteNoise (production)
 RUN python manage.py collectstatic --noinput || true
 
-# Expose the port Render/Railway will route to
+# Install supervisor to run gunicorn + celery in one container (free tier)
+RUN pip install supervisor
+
+# Copy supervisord config
+COPY supervisord.conf /etc/supervisord.conf
+
+# Expose the port Render will route to
 EXPOSE 8000
 
-# Default command — gunicorn for production, overridden in docker-compose for dev
-CMD ["sh", "-c", "python manage.py migrate --noinput && gunicorn Vulnsploit.wsgi:application --bind 0.0.0.0:8000 --workers 2 --timeout 120"]
+# Single container runs both gunicorn (API) + celery (worker) via supervisord
+CMD ["sh", "-c", "python manage.py migrate --noinput && supervisord -c /etc/supervisord.conf"]
