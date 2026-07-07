@@ -10,18 +10,18 @@ services:
     runtime: docker
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
-    plan: starter          # upgrade to standard for production
+    plan: starter
     healthCheckPath: /api/health/
+    ipAllowList: []        # empty = allow all IPs (public API)
     envVars:
       - key: SECRET_KEY
-        generateValue: true          # Render auto-generates a secure random value
+        generateValue: true
       - key: DEBUG
         value: "False"
       - key: ALLOWED_HOSTS
         value: ".onrender.com,localhost"
       - key: CORS_ALLOWED_ORIGINS
         value: "https://your-frontend.vercel.app,https://your-frontend.netlify.app"
-        # ↑ Replace with your actual frontend URL after deploying frontend
       - key: DB_ENGINE
         value: django.db.backends.postgresql
       - key: DB_NAME
@@ -55,9 +55,9 @@ services:
           type: redis
           property: connectionString
       - key: GEMINI_API_KEY
-        sync: false        # Set this manually in Render dashboard — never commit API keys
+        sync: false
       - key: SECURE_SSL_REDIRECT
-        value: "False"     # Render handles SSL at load balancer — keep this False
+        value: "False"
 
   # ─── Celery Worker (Background Worker) ────────────────────────────────────
   - type: worker
@@ -66,7 +66,6 @@ services:
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
     plan: starter
-    # Override the default CMD to run Celery instead of gunicorn
     dockerCommand: celery -A Vulnsploit worker --loglevel=info --concurrency=2
     envVars:
       - key: SECRET_KEY
@@ -117,10 +116,11 @@ services:
   # ─── Redis ─────────────────────────────────────────────────────────────────
   - type: redis
     name: vulnsploit-redis
-    plan: starter          # free 25MB Redis on Render
+    plan: starter
     maxmemoryPolicy: noeviction
+    ipAllowList: []        # allow all — internal Render network access only
 
 # ─── PostgreSQL Database ────────────────────────────────────────────────────
 databases:
   - name: vulnsploit-db
-    plan: starter          # free 1GB PostgreSQL on Render
+    plan: starter
