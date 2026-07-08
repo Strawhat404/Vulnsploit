@@ -161,6 +161,100 @@ def _rule_based_interpret(parsed: dict) -> list:
                 'tool':           'wpscan',
             })
 
+    elif tool == 'testssl':
+        # Certificate issues
+        cert = parsed.get('certificate', {})
+        if cert.get('cert_notAfter') and 'expired' in cert.get('cert_notAfter', '').lower():
+            findings.append({
+                'title':          'SSL Certificate Expired',
+                'severity':       'critical',
+                'description':    f'The SSL/TLS certificate has expired: {cert["cert_notAfter"]}.',
+                'impact':         'Browsers will show security warnings. Encrypted connections may be rejected.',
+                'recommendation': 'Renew the SSL certificate immediately.',
+                'evidence':       cert['cert_notAfter'],
+                'tool':           'testssl',
+            })
+
+        if cert.get('cert_trust') and 'untrusted' in cert.get('cert_trust', '').lower():
+            findings.append({
+                'title':          'SSL Certificate Not Trusted',
+                'severity':       'high',
+                'description':    'The SSL certificate is not trusted by major browsers.',
+                'impact':         'Users will see security warnings. Attackers can conduct MITM attacks.',
+                'recommendation': 'Replace with a certificate from a trusted Certificate Authority.',
+                'evidence':       cert.get('cert_trust', ''),
+                'tool':           'testssl',
+            })
+
+        # Weak/deprecated protocols
+        proto_names = {'SSLv2': 'SSL 2.0', 'SSLv3': 'SSL 3.0', 'TLS1': 'TLS 1.0', 'TLS1_1': 'TLS 1.1'}
+        for proto in parsed.get('protocols', []):
+            proto_id = proto.get('protocol', '')
+            findings.append({
+                'title':          f'Deprecated Protocol Enabled: {proto_names.get(proto_id, proto_id)}',
+                'severity':       proto.get('severity', 'high'),
+                'description':    f'{proto_names.get(proto_id, proto_id)} is enabled. This protocol is deprecated and insecure.',
+                'impact':         'Attackers can downgrade connections and decrypt traffic.',
+                'recommendation': f'Disable {proto_names.get(proto_id, proto_id)}. Support TLS 1.2 and TLS 1.3 only.',
+                'evidence':       proto.get('finding', ''),
+                'tool':           'testssl',
+            })
+
+        # Known vulnerabilities (Heartbleed, POODLE, etc.)
+        vuln_titles = {
+            'heartbleed':   ('Heartbleed Vulnerability (CVE-2014-0160)', 'critical',
+                             'Heartbleed allows attackers to read server memory, exposing private keys and passwords.'),
+            'POODLE_SSL':   ('POODLE Vulnerability (CVE-2014-3566)', 'high',
+                             'POODLE allows decryption of SSL 3.0 traffic via padding oracle attacks.'),
+            'ROBOT':        ('ROBOT Attack Vulnerability', 'high',
+                             'ROBOT allows RSA decryption and signing with the server\'s private key.'),
+            'SWEET32':      ('SWEET32 Birthday Attack', 'medium',
+                             '64-bit block ciphers (3DES, Blowfish) are vulnerable to birthday attacks.'),
+            'FREAK':        ('FREAK Attack Vulnerability', 'high',
+                             'FREAK allows attackers to force weak RSA export keys.'),
+            'LOGJAM':       ('Logjam Attack Vulnerability', 'high',
+                             'Logjam allows attackers to downgrade connections to weak Diffie-Hellman.'),
+            'BEAST':        ('BEAST Attack Vulnerability', 'medium',
+                             'BEAST exploits CBC mode in TLS 1.0 to decrypt HTTPS cookies.'),
+            'RC4':          ('RC4 Cipher Suite Enabled', 'medium',
+                             'RC4 is a broken cipher that allows statistical attacks on encrypted data.'),
+        }
+        for vuln in parsed.get('vulnerabilities', []):
+            vid = vuln.get('id', '').lower()
+            if vid in vuln_titles:
+                vtitle, vsev, vdesc = vuln_titles[vid]
+                findings.append({
+                    'title':          vtitle,
+                    'severity':       vsev,
+                    'description':    vdesc,
+                    'impact':         _default_impact(vsev),
+                    'recommendation': 'Patch OpenSSL/TLS library. Disable affected cipher suites and protocols.',
+                    'evidence':       vuln.get('finding', ''),
+                    'tool':           'testssl',
+                })
+            elif vuln.get('severity') in ('critical', 'high'):
+                findings.append({
+                    'title':          f'SSL/TLS Vulnerability: {vuln.get("id", "Unknown")}',
+                    'severity':       vuln.get('severity', 'high'),
+                    'description':    vuln.get('finding', 'SSL/TLS vulnerability detected.'),
+                    'impact':         _default_impact(vuln.get('severity', 'high')),
+                    'recommendation': 'Update TLS configuration and patch SSL library.',
+                    'evidence':       vuln.get('finding', ''),
+                    'tool':           'testssl',
+                })
+
+        # Cipher issues
+        for cipher in parsed.get('cipher_issues', []):
+            findings.append({
+                'title':          'Weak Cipher Suite Enabled',
+                'severity':       cipher.get('severity', 'medium'),
+                'description':    f'Weak cipher suite detected: {cipher.get("finding", "")}',
+                'impact':         'Weak ciphers can be exploited to decrypt intercepted traffic.',
+                'recommendation': 'Disable weak cipher suites. Use only AES-GCM and ChaCha20-Poly1305.',
+                'evidence':       cipher.get('finding', ''),
+                'tool':           'testssl',
+            })
+
     return findings
 
 

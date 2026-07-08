@@ -18,6 +18,8 @@ VALID_SCAN_TYPES = {
     'sqlmap',
     # Recon
     'subfinder', 'nuclei',
+    # SSL/TLS
+    'testssl',
     # Full recon (runs all tools)
     'full_recon',
 }

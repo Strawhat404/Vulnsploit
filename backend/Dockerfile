@@ -13,7 +13,13 @@ RUN apt-get update && apt-get install -y \
     libpango-1.0-0 libpangoft2-1.0-0 libpangocairo-1.0-0 \
     libcairo2 libffi-dev shared-mime-info \
     fonts-liberation fonts-dejavu-core \
+    dnsutils openssl bash \
     && apt-get clean
+
+# Install testssl.sh — SSL/TLS misconfiguration scanner
+RUN git clone --depth 1 https://github.com/drwetter/testssl.sh.git /opt/testssl \
+    && ln -s /opt/testssl/testssl.sh /usr/local/bin/testssl.sh \
+    && chmod +x /opt/testssl/testssl.sh
 
 #Install WhatWeb (from source)
 RUN git clone https://github.com/urbanadventurer/WhatWeb.git /opt/whatweb && gem install addressable \

@@ -29,6 +29,7 @@ TOOL_META = {
     'udp':            {'name': 'Nmap',       'category': 'Port Scanning',        'purpose': 'UDP port scanning'},
     'ping_sweep':     {'name': 'Nmap',       'category': 'Reconnaissance',       'purpose': 'Host discovery'},
     'service_version':{'name': 'Nmap',       'category': 'Fingerprinting',       'purpose': 'Service version detection'},
+    'testssl':        {'name': 'TestSSL',    'category': 'SSL/TLS Analysis',     'purpose': 'SSL/TLS misconfiguration and vulnerability detection'},
 }
 
 

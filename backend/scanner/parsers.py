@@ -350,6 +350,124 @@ def parse_wpscan(raw_json) -> dict:
     return result
 
 
+# ─── TestSSL ───────────────────────────────────────────────────────────────────
+
+def parse_testssl(raw_json) -> dict:
+    """
+    Parse testssl.sh JSON output into structured SSL/TLS findings.
+    testssl outputs a list of finding objects with id, severity, finding fields.
+    """
+    result = {
+        'tool': 'testssl',
+        'target': None,
+        'certificate': {},
+        'protocols': [],
+        'vulnerabilities': [],
+        'cipher_issues': [],
+        'findings': [],
+    }
+
+    if not raw_json:
+        return result
+
+    # testssl JSON structure: { "scanResult": [ { "ip": ..., "findings": [...] } ] }
+    scan_results = []
+    if isinstance(raw_json, dict):
+        scan_results = raw_json.get('scanResult', [])
+    elif isinstance(raw_json, list):
+        scan_results = raw_json
+
+    # Severity mapping from testssl to our scale
+    severity_map = {
+        'CRITICAL': 'critical',
+        'HIGH':     'high',
+        'MEDIUM':   'medium',
+        'LOW':      'low',
+        'INFO':     'info',
+        'OK':       'info',
+        'WARN':     'medium',
+        'NOT OK':   'high',
+    }
+
+    # IDs that indicate deprecated/weak protocols
+    weak_protocol_ids = {
+        'SSLv2', 'SSLv3', 'TLS1', 'TLS1_1',
+    }
+
+    # IDs that indicate known SSL/TLS vulnerabilities
+    vuln_ids = {
+        'heartbleed', 'CCS', 'ticketbleed', 'ROBOT',
+        'secure_renego', 'secure_client_renego',
+        'CRIME_TLS', 'BREACH', 'POODLE_SSL', 'fallback_SCSV',
+        'SWEET32', 'FREAK', 'DROWN', 'LOGJAM', 'LOGJAM-common_primes',
+        'BEAST_CBC_TLS1', 'BEAST', 'LUCKY13', 'RC4',
+    }
+
+    for scan in scan_results:
+        if not isinstance(scan, dict):
+            continue
+
+        result['target'] = scan.get('ip') or scan.get('hostname')
+
+        for finding in scan.get('findings', []):
+            if not isinstance(finding, dict):
+                continue
+
+            fid      = finding.get('id', '')
+            severity = finding.get('severity', 'INFO').upper()
+            finding_text = finding.get('finding', '')
+
+            normalized_sev = severity_map.get(severity, 'info')
+
+            entry = {
+                'id':       fid,
+                'severity': normalized_sev,
+                'finding':  finding_text,
+            }
+
+            # Certificate findings
+            if fid.startswith('cert_'):
+                result['certificate'][fid] = finding_text
+                if normalized_sev in ('critical', 'high', 'medium'):
+                    result['findings'].append(entry)
+
+            # Weak protocol findings
+            elif fid in weak_protocol_ids:
+                if 'offered' in finding_text.lower() or 'enabled' in finding_text.lower():
+                    result['protocols'].append({
+                        'protocol': fid,
+                        'status':   'weak/deprecated',
+                        'finding':  finding_text,
+                        'severity': normalized_sev,
+                    })
+                    result['findings'].append(entry)
+
+            # Known vulnerability findings
+            elif fid.lower() in {v.lower() for v in vuln_ids}:
+                if normalized_sev not in ('info',) or 'vulnerable' in finding_text.lower():
+                    result['vulnerabilities'].append({
+                        'id':       fid,
+                        'finding':  finding_text,
+                        'severity': normalized_sev,
+                    })
+                    result['findings'].append(entry)
+
+            # Cipher suite issues
+            elif 'cipher' in fid.lower() and normalized_sev in ('critical', 'high', 'medium'):
+                result['cipher_issues'].append({
+                    'id':       fid,
+                    'finding':  finding_text,
+                    'severity': normalized_sev,
+                })
+                result['findings'].append(entry)
+
+            # Catch all other high/critical findings
+            elif normalized_sev in ('critical', 'high'):
+                result['findings'].append(entry)
+
+    return result
+
+
 # ─── Master dispatcher ─────────────────────────────────────────────────────────
 
 def parse_scan_result(scan_type: str, result_text: str, result_json=None) -> dict:
@@ -375,6 +493,8 @@ def parse_scan_result(scan_type: str, result_text: str, result_json=None) -> dic
             return parse_whatweb(result_text)
         elif scan_type == 'wpscan':
             return parse_wpscan(result_json or {})
+        elif scan_type == 'testssl':
+            return parse_testssl(result_json or {})
         else:
             return {'tool': scan_type, 'raw': result_text}
     except Exception as e:

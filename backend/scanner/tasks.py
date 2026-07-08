@@ -54,6 +54,7 @@ def execute_scan(self, scan_id, target, scan_type):
 FULL_RECON_TOOLS = [
     'subfinder',      # passive recon first
     'whatweb',        # tech fingerprinting
+    'testssl',        # SSL/TLS misconfiguration check
     'quick',          # fast nmap
     'nikto',          # web vulns
     'gobuster',       # directory brute-force
