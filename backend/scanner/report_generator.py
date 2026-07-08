@@ -101,6 +101,8 @@ def render_pdf(report_id: int, target: str, interpreted: dict,
         total_findings    = interpreted.get('total_findings', 0),
         tools_used        = tools_used,
         raw_outputs       = raw_outputs,
+        cve_components    = interpreted.get('cve_components', []),
+        total_cves        = interpreted.get('total_cves', 0),
     )
 
     # ── Convert to PDF ────────────────────────────────────────────────────────

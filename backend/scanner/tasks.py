@@ -197,8 +197,31 @@ def generate_report(self, session_id=None, scan_ids=None, report_id=None):
                 'scan_id':     scan.id,
             })
 
+        # ── CVE enrichment — query NVD for known CVEs on detected software ──
+        from .cve_enricher import enrich_with_cves
+        cve_data = enrich_with_cves(scan_data)
+
         # AI interpret all findings
         interpreted = interpret_all_scans(scan_data, target)
+
+        # Merge CVE findings into interpreted findings (CVEs go first by severity)
+        if cve_data.get('findings'):
+            interpreted['findings'] = cve_data['findings'] + interpreted['findings']
+            # Re-sort all findings by severity
+            SEVERITY_ORDER = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3, 'info': 4}
+            interpreted['findings'].sort(
+                key=lambda x: SEVERITY_ORDER.get(x.get('severity', 'info'), 5)
+            )
+            # Update severity counts
+            for f in cve_data['findings']:
+                sev = f.get('severity', 'info').lower()
+                if sev in interpreted['severity_counts']:
+                    interpreted['severity_counts'][sev] += 1
+            interpreted['total_findings'] = len(interpreted['findings'])
+
+        # Store CVE component data for the PDF report table
+        interpreted['cve_components'] = cve_data.get('components', [])
+        interpreted['total_cves']     = cve_data.get('total_cves', 0)
 
         # Generate PDF
         pdf_path = render_pdf(report.id, target, interpreted, user)
