@@ -255,6 +255,29 @@ def _rule_based_interpret(parsed: dict) -> list:
                 'tool':           'testssl',
             })
 
+    elif tool == 'headers':
+        for f in parsed.get('findings', []):
+            if f.get('status') == 'missing':
+                findings.append({
+                    'title':          f['title'],
+                    'severity':       f['severity'],
+                    'description':    f['description'],
+                    'impact':         _headers_impact(f['header']),
+                    'recommendation': f['recommendation'],
+                    'evidence':       f'Header "{f["header"]}" not present in HTTP response from {parsed.get("target", "target")}',
+                    'tool':           'headers',
+                })
+            elif f.get('status') == 'dangerous':
+                findings.append({
+                    'title':          f['title'],
+                    'severity':       f['severity'],
+                    'description':    f['description'],
+                    'impact':         'Disclosed version information helps attackers identify vulnerable software.',
+                    'recommendation': f['recommendation'],
+                    'evidence':       f'{f["header"]}: {f["value"]}',
+                    'tool':           'headers',
+                })
+
     return findings
 
 
@@ -277,6 +300,18 @@ def _default_recommendation(service, port):
         'rdp':   'Restrict RDP to VPN only. Enable NLA. Use strong passwords.',
         'smb':   'Disable SMBv1. Restrict to internal network only.',
     }.get(service.lower(), f'Review whether port {port} needs to be publicly accessible.')
+
+
+def _headers_impact(header: str) -> str:
+    return {
+        'Strict-Transport-Security': 'Attackers can perform SSL stripping to intercept encrypted traffic.',
+        'Content-Security-Policy':   'Cross-site scripting (XSS) attacks are significantly easier without CSP.',
+        'X-Frame-Options':           'Clickjacking attacks can trick users into performing unintended actions.',
+        'X-Content-Type-Options':    'MIME-type confusion attacks can lead to script execution.',
+        'Referrer-Policy':           'Sensitive URL parameters may be leaked to third-party services.',
+        'Permissions-Policy':        'Malicious scripts may access camera, microphone, or location.',
+        'X-XSS-Protection':          'Legacy browsers may not block reflected XSS attacks.',
+    }.get(header, 'Security misconfiguration may assist attackers in exploiting the application.')
 
 
 # ─── Gemini interpreter ────────────────────────────────────────────────────────

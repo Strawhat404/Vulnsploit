@@ -55,6 +55,7 @@ FULL_RECON_TOOLS = [
     'subfinder',      # passive recon first
     'whatweb',        # tech fingerprinting
     'testssl',        # SSL/TLS misconfiguration check
+    'headers',        # HTTP security headers check
     'quick',          # fast nmap
     'nikto',          # web vulns
     'gobuster',       # directory brute-force

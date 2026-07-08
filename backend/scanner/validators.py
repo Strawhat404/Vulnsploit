@@ -20,6 +20,8 @@ VALID_SCAN_TYPES = {
     'subfinder', 'nuclei',
     # SSL/TLS
     'testssl',
+    # HTTP security headers
+    'headers',
     # Full recon (runs all tools)
     'full_recon',
 }

@@ -468,6 +468,22 @@ def parse_testssl(raw_json) -> dict:
     return result
 
 
+# ─── HTTP Security Headers ─────────────────────────────────────────────────────
+
+def parse_headers(raw_json) -> dict:
+    """
+    Parse HTTP security headers check result.
+    The result_json is already structured from _run_headers_check().
+    Just pass it through with tool key set.
+    """
+    if not raw_json:
+        return {'tool': 'headers', 'findings': [], 'missing_count': 0}
+
+    result = dict(raw_json)
+    result['tool'] = 'headers'
+    return result
+
+
 # ─── Master dispatcher ─────────────────────────────────────────────────────────
 
 def parse_scan_result(scan_type: str, result_text: str, result_json=None) -> dict:
@@ -495,6 +511,8 @@ def parse_scan_result(scan_type: str, result_text: str, result_json=None) -> dic
             return parse_wpscan(result_json or {})
         elif scan_type == 'testssl':
             return parse_testssl(result_json or {})
+        elif scan_type == 'headers':
+            return parse_headers(result_json or {})
         else:
             return {'tool': scan_type, 'raw': result_text}
     except Exception as e:

@@ -30,6 +30,7 @@ TOOL_META = {
     'ping_sweep':     {'name': 'Nmap',       'category': 'Reconnaissance',       'purpose': 'Host discovery'},
     'service_version':{'name': 'Nmap',       'category': 'Fingerprinting',       'purpose': 'Service version detection'},
     'testssl':        {'name': 'TestSSL',    'category': 'SSL/TLS Analysis',     'purpose': 'SSL/TLS misconfiguration and vulnerability detection'},
+    'headers':        {'name': 'HeadersCheck', 'category': 'HTTP Security',      'purpose': 'HTTP security headers misconfiguration check'},
 }
 
 

@@ -167,8 +167,18 @@ CELERY_RESULT_BACKEND   = config('CELERY_RESULT_BACKEND',  default='redis://redi
 CELERY_ACCEPT_CONTENT   = ['application/json']
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TASK_SERIALIZER  = 'json'
-CELERY_TASK_TIME_LIMIT  = 3600   # Hard kill task after 1 hour
-CELERY_TASK_SOFT_TIME_LIMIT = 3300  # Soft warning at 55 minutes
+CELERY_TASK_TIME_LIMIT  = 3600
+CELERY_TASK_SOFT_TIME_LIMIT = 3300
+
+# If using Upstash rediss:// URL, add SSL cert settings automatically
+_broker_url = config('CELERY_BROKER_URL', default='redis://redis:6379/0')
+if _broker_url.startswith('rediss://'):
+    CELERY_BROKER_USE_SSL = {
+        'ssl_cert_reqs': 'CERT_NONE',
+    }
+    CELERY_REDIS_BACKEND_USE_SSL = {
+        'ssl_cert_reqs': 'CERT_NONE',
+    }
 
 
 # ─── DJANGO REST FRAMEWORK ─────────────────────────────────────────────────────
