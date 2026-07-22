@@ -61,6 +61,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'Vulnsploit.middleware.ContentSecurityPolicyMiddleware',
 ]
 
 
@@ -212,11 +213,20 @@ GEMINI_API_KEY = config('GEMINI_API_KEY', default=None)
 # django-ratelimit cache backend
 RATELIMIT_USE_CACHE = 'default'
 
-CACHES = {
-    'default': {
-        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+_redis_url = config('CELERY_BROKER_URL', default='redis://redis:6379/0')
+if _redis_url.startswith('redis://') or _redis_url.startswith('rediss://'):
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': _redis_url,
+        }
     }
-}
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        }
+    }
 
 
 # ─── LOGGING ───────────────────────────────────────────────────────────────────

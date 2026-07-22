@@ -56,10 +56,7 @@ class ScanResultListCreateView(generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return ScanResult.objects.filter(
-            user=self.request.user,
-            recon_session__isnull=True,   # exclude scans that are part of a recon session
-        )
+        return ScanResult.objects.filter(user=self.request.user)
 
     def perform_create(self, serializer):
         target    = self.request.data.get('target', '').strip()

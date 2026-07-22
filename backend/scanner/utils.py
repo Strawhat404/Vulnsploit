@@ -2,6 +2,7 @@ import subprocess
 import json
 import os
 import requests as http_requests
+from decouple import config
 
 # Per-tool subprocess timeouts in seconds
 TOOL_TIMEOUTS = {
@@ -233,9 +234,10 @@ def run_scan(target, scan_type):
         elif scan_type == "subfinder":
             command = ["subfinder", "-d", target, "-silent"]
         elif scan_type == "whatweb":
-            command = ["whatweb", target, "--no-errors", "--color=never"]
+            command = ["whatweb", "--no-errors", "--color=never", "--", target]
         elif scan_type == "gobuster":
-            command = ["gobuster", "dir", "-u", target, "-w", "/usr/share/wordlists/common.txt", "--no-error"]
+            wordlist = config('GOBUSTER_WORDLIST', default='/usr/share/wordlists/common.txt')
+            command = ["gobuster", "dir", "-u", target, "-w", wordlist, "--no-error"]
         elif scan_type == "nuclei":
             command = ["nuclei", "-u", target, "-silent", "-jsonl"]
         elif scan_type == "wpscan":
