@@ -2,7 +2,7 @@ from rest_framework import serializers
 from django.contrib.auth.models import User
 from .models import (
     UserProfile, APIKey, Target, ScheduledScan, ScanResult, ReconSession, ScanReport,
-    Organization, OrganizationMember, AuditLog, WebhookEndpoint,
+    Organization, OrganizationMember, AuditLog, WebhookEndpoint, FindingStatus,
 )
 
 
@@ -41,6 +41,16 @@ class WebhookEndpointSerializer(serializers.ModelSerializer):
                   'organization', 'last_triggered_at', 'created_at']
         read_only_fields = ['id', 'last_triggered_at', 'created_at']
         extra_kwargs = {'secret': {'write_only': True}}
+
+
+class FindingStatusSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(source='user.username', read_only=True, default='')
+
+    class Meta:
+        model  = FindingStatus
+        fields = ['id', 'username', 'organization', 'target', 'fingerprint',
+                  'decision', 'note', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'username', 'created_at', 'updated_at']
 
 
 class TargetSerializer(serializers.ModelSerializer):

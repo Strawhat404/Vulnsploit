@@ -283,6 +283,28 @@ def generate_report(self, session_id=None, scan_ids=None, report_id=None):
         interpreted['cve_components'] = cve_data.get('components', [])
         interpreted['total_cves']     = cve_data.get('total_cves', 0)
 
+        # ── Deduplication — merge overlapping findings from multiple tools ──
+        from .dedup import deduplicate_findings
+        deduped, dedup_stats = deduplicate_findings(interpreted['findings'])
+        interpreted['findings'] = deduped
+        interpreted['dedup_stats'] = dedup_stats
+
+        # ── Suppression — apply false-positive / accepted-risk decisions ──
+        from .suppression import apply_suppressions
+        suppression_stats = apply_suppressions(interpreted['findings'], target)
+        interpreted['suppression_stats'] = suppression_stats
+
+        # Recalculate severity counts after dedup + suppression
+        severity_counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0, 'info': 0}
+        for f in deduped:
+            if f.get('suppression') in ('false_positive',):
+                continue  # Don't count false positives in severity totals
+            sev = f.get('severity', 'info').lower()
+            if sev in severity_counts:
+                severity_counts[sev] += 1
+        interpreted['severity_counts'] = severity_counts
+        interpreted['total_findings'] = len(deduped)
+
         # ── Compliance mapping — tag findings with OWASP + CWE categories ──
         from .compliance import enrich_findings_with_compliance, get_compliance_summary
         enrich_findings_with_compliance(interpreted['findings'])

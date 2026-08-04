@@ -1,6 +1,10 @@
 import subprocess
 import json
 import os
+import ssl
+import socket
+from datetime import datetime, timezone as dt_tz
+from urllib.parse import urlparse
 from decouple import config
 import requests as http_requests
 
@@ -104,13 +108,103 @@ DANGEROUS_HEADER_VALUES = {
 }
 
 
+def _check_ssl_cert(hostname: str, port: int = 443) -> dict:
+    """
+    Connect to hostname:port and retrieve the SSL certificate.
+    Returns a dict with:
+      - not_before:   str (ISO date)
+      - not_after:    str (ISO date)
+      - days_remaining: int
+      - expired:      bool
+      - self_signed:  bool
+      - issuer:       str
+      - subject:      str
+    Returns None if the connection fails or no cert is available.
+    """
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        with socket.create_connection((hostname, port), timeout=10) as sock:
+            with ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
+                cert = ssock.getpeercert()
+
+        if not cert:
+            # Self-signed certs may not be returned by getpeercert()
+            # when verify_mode is CERT_NONE. Try the binary form.
+            try:
+                cert_bin = ssock.getpeercert(binary_form=True)
+                if cert_bin:
+                    return {
+                        'not_before':     '',
+                        'not_after':      '',
+                        'days_remaining': None,
+                        'expired':        False,
+                        'self_signed':    True,
+                        'issuer':         'Self-signed',
+                        'subject':        hostname,
+                    }
+            except Exception:
+                pass
+            return None
+
+        # Parse cert dates (format: 'Jul 22 12:00:00 2026 GMT')
+        not_before_str = cert.get('notBefore', '')
+        not_after_str  = cert.get('notAfter', '')
+
+        not_after  = _parse_ssl_date(not_after_str)
+        not_before = _parse_ssl_date(not_before_str)
+
+        now = datetime.now(dt_tz.utc)
+
+        days_remaining = None
+        expired = False
+        if not_after:
+            days_remaining = (not_after - now).days
+            expired = days_remaining < 0
+
+        # Check if self-signed (issuer == subject)
+        issuer = dict(x[0] for x in cert.get('issuer', ()))
+        subject = dict(x[0] for x in cert.get('subject', ()))
+        self_signed = issuer == subject
+
+        return {
+            'not_before':     not_before.strftime('%Y-%m-%d') if not_before else not_before_str,
+            'not_after':      not_after.strftime('%Y-%m-%d') if not_after else not_after_str,
+            'days_remaining': days_remaining,
+            'expired':        expired,
+            'self_signed':    self_signed,
+            'issuer':         issuer.get('organizationName', str(issuer))[:100],
+            'subject':        subject.get('commonName', hostname)[:100],
+        }
+
+    except Exception as e:
+        # Connection failed — not an HTTPS host or port closed
+        return None
+
+
+def _parse_ssl_date(date_str: str):
+    """Parse SSL date format: 'Jul 22 12:00:00 2026 GMT' → datetime."""
+    try:
+        return datetime.strptime(date_str, '%b %d %H:%M:%S %Y %Z').replace(tzinfo=dt_tz.utc)
+    except (ValueError, TypeError):
+        return None
+
+
 def _run_headers_check(target: str):
     """
     Run HTTP security headers check using the requests library.
     Makes a single HEAD request (falls back to GET) and checks for
     presence/absence and correctness of security headers.
+    Also extracts SSL certificate expiration info when HTTPS is used.
     Returns (result_text, result_json) matching the run_scan() return format.
     """
+    import ssl
+    import socket
+    from urllib.parse import urlparse
+    from datetime import datetime, timezone as dt_tz
+
     # Ensure target has a scheme
     if not target.startswith(('http://', 'https://')):
         url = f'https://{target}'
@@ -120,6 +214,7 @@ def _run_headers_check(target: str):
     findings  = []
     headers_found = {}
     error_msg = None
+    cert_info = None
 
     try:
         resp = http_requests.get(
@@ -153,6 +248,53 @@ def _run_headers_check(target: str):
         headers_found = {}
         final_url     = url
         status_code   = None
+
+    # ── SSL certificate expiration check ──────────────────────────────
+    # Extract the hostname from the URL and connect to retrieve the cert.
+    # This runs independently of the HTTP request above so we still get
+    # cert info even if the HTTP request failed due to SSL errors.
+    parsed = urlparse(final_url or url)
+    hostname = parsed.hostname
+    if hostname and (final_url or url).startswith('https://'):
+        cert_info = _check_ssl_cert(hostname, 443)
+        if cert_info:
+            if cert_info.get('expired'):
+                findings.append({
+                    'header':        'SSL Certificate',
+                    'present':       True,
+                    'value':         f"expired: {cert_info.get('not_after', '')}",
+                    'severity':      'critical',
+                    'status':        'dangerous',
+                    'title':         'SSL Certificate Expired',
+                    'description':   f"The SSL/TLS certificate expired on {cert_info.get('not_after', 'unknown date')}. "
+                                     f"Browsers will reject connections and display security warnings.",
+                    'recommendation': 'Renew the SSL certificate immediately.',
+                })
+            elif cert_info.get('days_remaining') is not None and cert_info['days_remaining'] <= 30:
+                days = cert_info['days_remaining']
+                sev = 'high' if days <= 7 else 'medium' if days <= 14 else 'low'
+                findings.append({
+                    'header':        'SSL Certificate',
+                    'present':       True,
+                    'value':         f"expires in {days} days",
+                    'severity':      sev,
+                    'status':        'dangerous',
+                    'title':         f'SSL Certificate Expiring Soon ({days} days)',
+                    'description':   f"The SSL/TLS certificate will expire on {cert_info.get('not_after', '')}, "
+                                     f"in {days} days. Action is needed to avoid service disruption.",
+                    'recommendation': 'Renew the SSL certificate before it expires to avoid service interruption.',
+                })
+            elif cert_info.get('self_signed'):
+                findings.append({
+                    'header':        'SSL Certificate',
+                    'present':       True,
+                    'value':         'self-signed',
+                    'severity':      'medium',
+                    'status':        'dangerous',
+                    'title':         'Self-Signed SSL Certificate',
+                    'description':   'The SSL/TLS certificate is self-signed and not trusted by browsers.',
+                    'recommendation': 'Replace with a certificate from a trusted Certificate Authority (Let\'s Encrypt, DigiCert, etc.).',
+                })
 
     # Normalize header keys to title-case for consistent lookup
     normalized = {k.title(): v for k, v in headers_found.items()}
@@ -196,6 +338,7 @@ def _run_headers_check(target: str):
         'headers_found': normalized,
         'findings':     findings,
         'missing_count': sum(1 for f in findings if f['status'] == 'missing'),
+        'cert_info':    cert_info,
         'error':        error_msg,
     }
 

@@ -10,7 +10,8 @@ from .views import (
     ScheduledScanListCreateView, ScheduledScanDetailView,
     CancelScanView, CancelReconView,
     OrganizationViewSet, OrganizationMemberViewSet, AuditLogListView,
-    ReportCompareView, WebhookEndpointViewSet,
+    ReportCompareView, ReportExportView, WebhookEndpointViewSet,
+    FindingStatusViewSet,
 )
 
 router = DefaultRouter()
@@ -18,6 +19,7 @@ router.register(r'targets', TargetViewSet, basename='target')
 router.register(r'organizations', OrganizationViewSet, basename='organization')
 router.register(r'organization-members', OrganizationMemberViewSet, basename='organization-member')
 router.register(r'webhooks', WebhookEndpointViewSet, basename='webhook')
+router.register(r'finding-statuses', FindingStatusViewSet, basename='finding-status')
 
 urlpatterns = [
     path('', include(router.urls)),
@@ -42,6 +44,9 @@ urlpatterns = [
 
     # Report comparison
     path('reports/compare/',             ReportCompareView.as_view(),         name='report-compare'),
+
+    # Report export (SARIF / JSON)
+    path('reports/<int:pk>/export/',     ReportExportView.as_view(),           name='report-export'),
 
     # Auth
     path('register/',                   RegisterView.as_view(),              name='register'),

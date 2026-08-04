@@ -344,3 +344,42 @@ class WebhookEndpoint(models.Model):
 
     def __str__(self):
         return f"{self.name} → {self.url[:60]}"
+
+
+# ─── Finding lifecycle / false-positive suppression ──────────────────────────
+
+class FindingStatus(models.Model):
+    """
+    Tracks the triage state of a finding across scans.
+    Findings are matched by fingerprint (title + tool + cve_id) so
+    suppressions persist even when findings_json is regenerated.
+
+    Suppressions are scoped to a target (not a specific report) so
+    that scheduled scans inherit suppressions from previous runs.
+    """
+
+    class Decision(models.TextChoices):
+        OPEN              = 'open',              'Open'
+        FALSE_POSITIVE    = 'false_positive',    'False Positive'
+        ACCEPTED_RISK     = 'accepted_risk',     'Accepted Risk'
+        REMEDIATED        = 'remediated',        'Remediated'
+
+    user          = models.ForeignKey(User, on_delete=models.CASCADE, related_name='finding_statuses', null=True, blank=True)
+    organization  = models.ForeignKey('Organization', on_delete=models.CASCADE, null=True, blank=True, related_name='finding_statuses')
+    target        = models.CharField(max_length=255, help_text='Target value this suppression applies to')
+    fingerprint   = models.CharField(max_length=500, help_text='Stable fingerprint: title|tool|cve_id')
+    decision      = models.CharField(max_length=20, choices=Decision.choices, default=Decision.OPEN)
+    note          = models.TextField(blank=True)
+    created_at    = models.DateTimeField(auto_now_add=True)
+    updated_at    = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-updated_at']
+        unique_together = ['target', 'fingerprint']
+        indexes = [
+            models.Index(fields=['target', 'fingerprint']),
+            models.Index(fields=['decision']),
+        ]
+
+    def __str__(self):
+        return f"{self.target} | {self.fingerprint[:60]} | {self.decision}"

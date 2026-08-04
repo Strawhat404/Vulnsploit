@@ -16,14 +16,14 @@ from django.utils.decorators import method_decorator
 
 from .models import (
     UserProfile, APIKey, Target, ScheduledScan, ScanResult, ReconSession, ScanReport,
-    Organization, OrganizationMember, AuditLog, WebhookEndpoint,
+    Organization, OrganizationMember, AuditLog, WebhookEndpoint, FindingStatus,
 )
 from .serializers import (
     TargetSerializer, ScanResultSerializer, ReconSessionSerializer,
     ScanReportSerializer, RegisterSerializer, ProfileSerializer,
     ChangePasswordSerializer, CreateAPIKeySerializer, APIKeySerializer,
     ScheduledScanSerializer, OrganizationSerializer, OrganizationMemberSerializer,
-    AuditLogSerializer, WebhookEndpointSerializer,
+    AuditLogSerializer, WebhookEndpointSerializer, FindingStatusSerializer,
 )
 from .tasks import execute_scan, execute_full_recon, generate_report
 from .validators import validate_target, validate_scan_type
@@ -724,6 +724,59 @@ class ReportCompareView(APIView):
         return Response(diff)
 
 
+class ReportExportView(APIView):
+    """
+    GET /api/reports/<id>/export/?format=sarif|json
+    Exports findings as SARIF 2.1.0 or plain JSON.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        qs = org_scoped_queryset(ScanReport, request.user)
+        try:
+            report = qs.get(id=pk)
+        except ScanReport.DoesNotExist:
+            raise Http404
+
+        if report.status != ScanReport.Status.READY:
+            return Response(
+                {'detail': 'Report is not ready yet.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        fmt = request.query_params.get('format', 'json').lower()
+        findings = report.findings_json or []
+
+        if fmt == 'sarif':
+            from .exports import findings_to_sarif
+            return Response(findings_to_sarif(findings, report.target))
+
+        elif fmt == 'json':
+            from .exports import findings_to_json
+            from .posture import calculate_posture_score
+            score = calculate_posture_score(
+                report.severity_counts or {},
+                len(findings),
+            )
+            report_data = {
+                'id':              report.id,
+                'target':          report.target,
+                'risk_level':      report.risk_level,
+                'posture_score':   score,
+                'severity_counts': report.severity_counts,
+                'total_findings':  len(findings),
+                'dedup_stats':     None,
+                'compliance_summary': None,
+                'generated_at':    report.generated_at,
+            }
+            return Response(findings_to_json(findings, report_data))
+
+        return Response(
+            {'detail': 'Unsupported format. Use ?format=sarif or ?format=json'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
 # ─── Webhook Endpoints ─────────────────────────────────────────────────────────
 
 class WebhookEndpointViewSet(viewsets.ModelViewSet):
@@ -743,4 +796,34 @@ class WebhookEndpointViewSet(viewsets.ModelViewSet):
         # Auto-generate HMAC secret if not provided
         if not serializer.validated_data.get('secret'):
             serializer.validated_data['secret'] = _secrets.token_hex(32)
+        serializer.save(user=self.request.user, organization=resolve_org(self.request))
+
+
+# ─── Finding Status / False Positive Suppression ──────────────────────────────
+
+class FindingStatusViewSet(viewsets.ModelViewSet):
+    """
+    CRUD for finding triage decisions (false positive, accepted risk,
+    remediated). Suppressions are scoped to a target and persist across
+    scans — suppressed findings are tagged but not removed from reports,
+    and false positives are excluded from severity counts / posture score.
+    """
+    serializer_class   = FindingStatusSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class   = ScanPagination
+    filterset_fields   = ['target', 'decision']
+
+    def get_queryset(self):
+        user_orgs = get_user_orgs(self.request.user)
+        qs = FindingStatus.objects.filter(
+            dj_models.Q(organization__in=user_orgs) |
+            dj_models.Q(organization__isnull=True, user=self.request.user)
+        )
+        # Optional filter by target
+        target = self.request.query_params.get('target')
+        if target:
+            qs = qs.filter(target=target)
+        return qs
+
+    def perform_create(self, serializer):
         serializer.save(user=self.request.user, organization=resolve_org(self.request))
