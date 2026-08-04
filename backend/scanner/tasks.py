@@ -1,6 +1,12 @@
 import logging
+import os
+import threading
+import concurrent.futures
+from pathlib import Path
 from celery import shared_task, chain
 from django.utils import timezone
+from django.core.files import File
+from django.conf import settings
 from .utils import run_scan
 from .models import ScanResult, ReconSession
 
@@ -34,6 +40,10 @@ def execute_scan(self, scan_id, target, scan_type):
         scan.save(update_fields=['status', 'result', 'result_json', 'completed_at'])
 
         logger.info("Scan %s completed | target=%s", scan_id, target)
+
+        from .notifications import send_scan_complete_email
+        send_scan_complete_email(scan.user, scan)
+
         return f"Scan {scan_id} completed"
 
     except Exception as exc:
@@ -45,6 +55,10 @@ def execute_scan(self, scan_id, target, scan_type):
             scan.save(update_fields=['status', 'result', 'completed_at'])
         except Exception:
             pass
+
+        from .notifications import send_scan_complete_email
+        send_scan_complete_email(scan.user, scan)
+
         return f"Scan {scan_id} failed: {str(exc)}"
 
 
@@ -67,8 +81,8 @@ FULL_RECON_TOOLS = [
 @shared_task(bind=True, max_retries=0)
 def execute_full_recon(self, session_id):
     """
-    Run all recon tools sequentially against a target.
-    Updates ReconSession status as tools complete.
+    Run all recon tools in parallel against a target.
+    Uses ThreadPoolExecutor for concurrent tool execution.
     """
     try:
         session = ReconSession.objects.get(id=session_id)
@@ -82,11 +96,12 @@ def execute_full_recon(self, session_id):
     logger.info("Full recon started | session=%s target=%s", session_id, session.target)
 
     failed_tools = []
+    lock = threading.Lock()
 
-    for tool in FULL_RECON_TOOLS:
-        # Create a ScanResult for this tool
+    def run_tool(tool):
         scan = ScanResult.objects.create(
             user          = session.user,
+            organization = session.organization_id,
             target        = session.target,
             scan_type     = tool,
             status        = ScanResult.Status.RUNNING,
@@ -113,7 +128,11 @@ def execute_full_recon(self, session_id):
             scan.result       = f"Error: {str(exc)}"
             scan.completed_at = timezone.now()
             scan.save(update_fields=['status', 'result', 'completed_at'])
-            failed_tools.append(tool)
+            with lock:
+                failed_tools.append(tool)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(FULL_RECON_TOOLS)) as executor:
+        list(executor.map(run_tool, FULL_RECON_TOOLS))
 
     # Mark session complete
     session.status       = ReconSession.Status.COMPLETED
@@ -129,6 +148,46 @@ def execute_full_recon(self, session_id):
     generate_report.delay(session_id=session_id)
 
     return f"Full recon session {session_id} completed"
+
+
+# ─── Scheduled scan entry point (driven by django-celery-beat) ─────────────────
+
+@shared_task(bind=True, max_retries=0)
+def run_scheduled_scan(self, scheduled_scan_id):
+    """
+    Triggered by Celery Beat from a ScheduledScan row. Creates a fresh
+    pending ScanResult and delegates to execute_scan, then updates the
+    ScheduledScan's last_run_at / next_run_at bookkeeping.
+    """
+    from .models import ScheduledScan, ScanResult
+
+    try:
+        scheduled = ScheduledScan.objects.get(id=scheduled_scan_id)
+    except ScheduledScan.DoesNotExist:
+        logger.warning("run_scheduled_scan: ScheduledScan %s missing", scheduled_scan_id)
+        return
+
+    if not scheduled.is_active:
+        logger.info("run_scheduled_scan: %s is inactive — skipping", scheduled_scan_id)
+        return
+
+    scan = ScanResult.objects.create(
+        user          = scheduled.user,
+        organization  = scheduled.organization_id,
+        target        = scheduled.target,
+        scan_type     = scheduled.scan_type,
+        status        = ScanResult.Status.PENDING,
+        result        = "Scan queued (scheduled)...",
+    )
+    task = execute_scan.delay(scan.id, scheduled.target, scheduled.scan_type)
+    scan.celery_task_id = task.id
+    scan.save(update_fields=['celery_task_id'])
+
+    scheduled.last_run_at = timezone.now()
+    scheduled.save(update_fields=['last_run_at'])
+
+    logger.info("Scheduled scan fired | scheduled_scan=%s scan=%s target=%s",
+                scheduled_scan_id, scan.id, scheduled.target)
 
 
 # ─── Report generation task ────────────────────────────────────────────────────
@@ -224,20 +283,42 @@ def generate_report(self, session_id=None, scan_ids=None, report_id=None):
         interpreted['cve_components'] = cve_data.get('components', [])
         interpreted['total_cves']     = cve_data.get('total_cves', 0)
 
-        # Generate PDF
-        pdf_path = render_pdf(report.id, target, interpreted, user)
+        # Generate PDF (writes to MEDIA_ROOT/reports/<filename> locally)
+        pdf_rel_path = render_pdf(report.id, target, interpreted, user, scans)
+
+        # Persist the PDF via the configured storage backend. Using
+        # FileField.save() ensures the file is uploaded to S3/R2 when
+        # django-storages is configured, and simply copied in place when
+        # using the default local filesystem storage.
+        local_pdf_path = os.path.join(settings.MEDIA_ROOT, pdf_rel_path)
+        filename       = Path(pdf_rel_path).name
+        with open(local_pdf_path, 'rb') as f:
+            report.pdf_file.save(filename, File(f), save=False)
+
+        # If we are using a remote object store (S3/R2), remove the local
+        # copy to keep the ephemeral filesystem small.
+        _remote_storage = 'S3Storage' in getattr(
+            settings, 'STORAGES', {}).get('default', {}).get('BACKEND', '')
+        if _remote_storage:
+            try:
+                os.remove(local_pdf_path)
+            except OSError:
+                pass
 
         # Save report
         report.findings_json   = interpreted['findings']
         report.severity_counts = interpreted['severity_counts']
         report.risk_level      = interpreted['risk_level']
-        report.pdf_file        = pdf_path
         report.status          = ScanReport.Status.READY
         report.generated_at    = timezone.now()
         report.save()
 
         logger.info("Report %s generated | target=%s findings=%d",
                     report.id, target, interpreted['total_findings'])
+
+        from .notifications import send_report_ready_email
+        send_report_ready_email(user, report)
+
         return f"Report {report.id} generated"
 
     except Exception as exc:

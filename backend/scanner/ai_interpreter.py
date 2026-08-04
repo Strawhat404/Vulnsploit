@@ -327,7 +327,7 @@ def _gemini_interpret(parsed: dict, target: str) -> list:
             return _rule_based_interpret(parsed)
 
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.0-flash')
 
         data_str = json.dumps(parsed, indent=2)[:4000]
 
@@ -374,17 +374,127 @@ If there are no significant findings, return an empty array [].
 # ─── Public API ────────────────────────────────────────────────────────────────
 
 def interpret_scan(scan_type: str, parsed_data: dict, target: str) -> list:
+    return _rule_based_interpret(parsed_data)
+
+
+def _generate_executive_summary(target: str, risk_level: str, severity_counts: dict, total: int) -> str:
     api_key = config('GEMINI_API_KEY', default=None)
     if api_key:
-        return _gemini_interpret(parsed_data, target)
-    return _rule_based_interpret(parsed_data)
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel('gemini-2.0-flash')
+            prompt = f"""You are a senior penetration tester writing an executive summary for a security assessment report.
+
+Target: {target}
+Risk Level: {risk_level}
+Findings: {severity_counts}
+Total Findings: {total}
+
+Write a 3-4 sentence executive summary in professional plain English suitable for a C-suite audience. Focus on business risk, not technical details. Do not use markdown. Do not include a salutation."""
+            response = model.generate_content(prompt)
+            summary = response.text.strip()
+            logger.info("Gemini generated executive summary for %s", target)
+            return summary
+        except Exception as e:
+            logger.warning("Gemini executive summary failed (%s) — using template", str(e))
+    return _template_summary(target, risk_level, severity_counts, total)
+
+
+def _template_summary(target: str, risk_level: str, severity_counts: dict, total: int) -> str:
+    crit = severity_counts.get('critical', 0)
+    high = severity_counts.get('high', 0)
+    if crit > 0:
+        return (
+            f"The security assessment of {target} identified {total} findings, "
+            f"including {crit} critical and {high} high severity issues that require "
+            f"immediate attention. The target presents significant security risks."
+        )
+    if high > 0:
+        return (
+            f"The security assessment of {target} identified {total} findings, "
+            f"including {high} high severity issues. Prompt remediation is recommended."
+        )
+    if total > 0:
+        return (
+            f"The security assessment of {target} identified {total} findings "
+            f"of medium to low severity. Standard remediation procedures apply."
+        )
+    return f"The security assessment of {target} identified no significant vulnerabilities."
+
+
+def _enrich_findings_with_ai(all_findings: list, target: str) -> dict:
+    api_key = config('GEMINI_API_KEY', default=None)
+    if not api_key:
+        return {'findings': all_findings, 'attack_paths': []}
+
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-2.0-flash')
+
+        findings_summary = []
+        for f in all_findings:
+            findings_summary.append({
+                'title':        f['title'],
+                'severity':     f['severity'],
+                'description':  f['description'],
+                'recommendation': f['recommendation'],
+                'evidence':     f['evidence'][:200],
+            })
+
+        prompt = f"""You are a senior penetration tester reviewing findings for {target}.
+
+Findings:
+{json.dumps(findings_summary, indent=2)}
+
+Return a JSON object with two keys:
+1. "findings" — same array, but each finding gets an enhanced "recommendation" field with:
+   - Specific command-line commands (e.g. nmap, curl, sqlmap, openssl)
+   - Configuration snippets (e.g. Nginx/Apache config, Docker, headers)
+   - Links to official documentation or CVEs
+   Make recommendations concrete and actionable, not generic.
+
+2. "attack_paths" — an array of possible attack chains (max 3) that connect multiple findings together.
+   Each attack path must have:
+   - "title": short name (e.g. "Web App to Database Pivot")
+   - "severity": critical/high/medium/low
+   - "description": 2-3 sentences explaining the chain
+   - "steps": array of step-by-step actions an attacker would take
+   - "findings_involved": array of finding titles that are part of this chain
+
+Return ONLY valid JSON. No markdown, no explanation."""
+
+        response = model.generate_content(prompt)
+        content = re.sub(r'^```(?:json)?\n?', '', response.text.strip())
+        content = re.sub(r'\n?```$', '', content)
+        result = json.loads(content)
+
+        enhanced = result.get('findings', all_findings)
+        for i, f in enumerate(enhanced):
+            if i < len(all_findings):
+                all_findings[i]['recommendation'] = f.get('recommendation', all_findings[i]['recommendation'])
+
+        attack_paths = result.get('attack_paths', [])
+        logger.info("Gemini enriched %d findings and identified %d attack paths", len(all_findings), len(attack_paths))
+        return {'findings': all_findings, 'attack_paths': attack_paths}
+
+    except Exception as e:
+        logger.warning("Gemini enrichment failed (%s) — skipping", str(e))
+        return {'findings': all_findings, 'attack_paths': []}
 
 
 def interpret_all_scans(scan_results: list, target: str) -> dict:
     all_findings = []
 
+    api_key = config('GEMINI_API_KEY', default=None)
+    use_gemini = bool(api_key)
+
     for scan in scan_results:
-        findings = interpret_scan(scan['scan_type'], scan['parsed_data'], target)
+        if use_gemini:
+            findings = _gemini_interpret(scan['parsed_data'], target)
+        else:
+            findings = _rule_based_interpret(scan['parsed_data'])
         all_findings.extend(findings)
 
     all_findings.sort(key=lambda x: SEVERITY_ORDER.get(x.get('severity', 'info'), 5))
@@ -401,31 +511,21 @@ def interpret_all_scans(scan_results: list, target: str) -> dict:
 
     if crit > 0:
         risk_level = 'CRITICAL'
-        summary = (
-            f"The security assessment of {target} identified {total} findings, "
-            f"including {crit} critical and {high} high severity issues that require "
-            f"immediate attention. The target presents significant security risks."
-        )
     elif high > 0:
         risk_level = 'HIGH'
-        summary = (
-            f"The security assessment of {target} identified {total} findings, "
-            f"including {high} high severity issues. Prompt remediation is recommended."
-        )
     elif total > 0:
         risk_level = 'MEDIUM'
-        summary = (
-            f"The security assessment of {target} identified {total} findings "
-            f"of medium to low severity. Standard remediation procedures apply."
-        )
     else:
         risk_level = 'LOW'
-        summary = f"The security assessment of {target} identified no significant vulnerabilities."
+
+    enriched = _enrich_findings_with_ai(all_findings, target)
+    attack_paths = enriched.get('attack_paths', [])
 
     return {
-        'findings':          all_findings,
+        'findings':          enriched['findings'],
         'severity_counts':   severity_counts,
         'total_findings':    total,
         'risk_level':        risk_level,
-        'executive_summary': summary,
+        'executive_summary': _generate_executive_summary(target, risk_level, severity_counts, total),
+        'attack_paths':      attack_paths,
     }

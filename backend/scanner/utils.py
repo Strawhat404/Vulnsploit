@@ -1,8 +1,8 @@
 import subprocess
 import json
 import os
-import requests as http_requests
 from decouple import config
+import requests as http_requests
 
 # Per-tool subprocess timeouts in seconds
 TOOL_TIMEOUTS = {
@@ -252,7 +252,7 @@ def run_scan(target, scan_type):
                 "--jsonfile", "/tmp/testssl_output.json",
                 "--warnings", "off",
                 "--color", "0",
-                target,
+                "--", target,
             ]
         elif scan_type == "headers":
             # Pure Python — handled separately, no subprocess needed
