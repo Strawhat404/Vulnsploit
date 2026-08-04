@@ -19,11 +19,29 @@ logger = logging.getLogger('scanner')
 # NVD API v2 base URL
 NVD_API_URL = 'https://services.nvd.nist.gov/rest/json/cves/2.0'
 
+# EPSS API (Exploit Prediction Scoring System) — FIRST.org
+EPSS_API_URL = 'https://api.first.org/data/v1/epss'
+
+# CISA Known Exploited Vulnerabilities (KEV) catalog feed
+CISA_KEV_URL = 'https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json'
+
 # Request timeout
 REQUEST_TIMEOUT = 10
 
-# Max CVEs to return per software component
+# Max CVEs to fetch from NVD per component (before false-positive filtering).
+# NVD returns many results for cpeName queries; we post-filter to only keep
+# CVEs where the software is listed as VULNERABLE. Fetch more than we need
+# so real CVEs aren't lost to pagination.
+NVD_FETCH_PER_PAGE = 50
+
+# Max CVEs to return per software component AFTER filtering
 MAX_CVES_PER_COMPONENT = 5
+
+# Max CVE IDs per single EPSS batch request (EPSS allows up to 100)
+EPSS_BATCH_SIZE = 100
+
+# In-process cache of the CISA KEV catalog (set of CVE IDs)
+_kev_cache = None
 
 # CVSS score → severity mapping
 def _cvss_to_severity(score: float) -> str:
@@ -228,10 +246,101 @@ def _parse_nmap_version_string(service: str, version_str: str) -> list:
 
 # ─── NVD API client ────────────────────────────────────────────────────────────
 
+def _cpe_matches_target(cpe_string: str, vendor: str, product: str, version: str) -> bool:
+    """
+    Check if a CPE match string refers to our target software.
+    CPE format: cpe:2.3:a:VENDOR:PRODUCT:VERSION:...
+    """
+    parts = cpe_string.split(':')
+    if len(parts) < 6:
+        return False
+    cpe_vendor  = parts[3]
+    cpe_product = parts[4]
+    cpe_version = parts[5]
+    if cpe_vendor != vendor or cpe_product != product:
+        return False
+    # Version match: exact, wildcard, or prefix
+    if cpe_version == '*' or cpe_version == version:
+        return True
+    if cpe_version.endswith('*') and version.startswith(cpe_version[:-1]):
+        return True
+    return False
+
+
+def _version_in_range(version: str, cpe_match: dict) -> bool:
+    """
+    Check if our version falls within the NVD cpeMatch version bounds.
+    NVD uses versionStartIncluding / versionStartExcluding /
+    versionEndIncluding / versionEndExcluding fields.
+    """
+    import re
+    # If no version bounds on the match, it's a catch-all
+    has_start = any(k in cpe_match for k in
+                    ('versionStartIncluding', 'versionStartExcluding'))
+    has_end   = any(k in cpe_match for k in
+                    ('versionEndIncluding', 'versionEndExcluding'))
+    if not has_start and not has_end:
+        return True
+
+    def _normalize(v):
+        """Extract leading numeric version for comparison."""
+        m = re.match(r'(\d+(?:\.\d+)*)(.*)', v or '')
+        return tuple(int(x) for x in m.group(1).split('.')) if m and m.group(1) else (0,)
+
+    our_v = _normalize(version)
+
+    if has_start:
+        start_inc = cpe_match.get('versionStartIncluding')
+        start_exc = cpe_match.get('versionStartExcluding')
+        if start_inc:
+            if our_v < _normalize(start_inc):
+                return False
+        if start_exc:
+            if our_v <= _normalize(start_exc):
+                return False
+
+    if has_end:
+        end_inc = cpe_match.get('versionEndIncluding')
+        end_exc = cpe_match.get('versionEndExcluding')
+        if end_inc:
+            if our_v > _normalize(end_inc):
+                return False
+        if end_exc:
+            if our_v >= _normalize(end_exc):
+                return False
+
+    return True
+
+
+def _cve_affects_software(cve_data: dict, vendor: str, product: str, version: str) -> bool:
+    """
+    Check if a CVE actually lists our target software+version as VULNERABLE
+    in its CPE configurations. This filters out false positives where the
+    software appears only as a non-vulnerable environment requirement.
+    """
+    for config in cve_data.get('configurations', []):
+        for node in config.get('nodes', []):
+            for cpe_match in node.get('cpeMatch', []):
+                if not cpe_match.get('vulnerable'):
+                    continue
+                criteria = cpe_match.get('criteria', '')
+                if not _cpe_matches_target(criteria, vendor, product, version):
+                    continue
+                if not _version_in_range(version, cpe_match):
+                    continue
+                return True
+    return False
+
+
 def query_nvd_for_component(name: str, version: str) -> list:
     """
     Query NVD API v2 for CVEs affecting a specific software version.
     Returns list of CVE dicts sorted by CVSS score descending.
+
+    Post-filters NVD results to only include CVEs where the target
+    software+version appears as a VULNERABLE CPE (not just an environment
+    requirement), eliminating false positives like CVE-2007-4723 (Ragnarok
+    Online Control Panel) being attributed to Apache httpd.
     """
     cpe_vendor_product = SOFTWARE_MAP.get(name)
     if not cpe_vendor_product:
@@ -252,7 +361,7 @@ def query_nvd_for_component(name: str, version: str) -> list:
             NVD_API_URL,
             params={
                 'cpeName':    cpe_match,
-                'resultsPerPage': MAX_CVES_PER_COMPONENT,
+                'resultsPerPage': NVD_FETCH_PER_PAGE,
             },
             headers=headers,
             timeout=REQUEST_TIMEOUT,
@@ -272,6 +381,17 @@ def query_nvd_for_component(name: str, version: str) -> list:
         for vuln in data.get('vulnerabilities', []):
             cve_data = vuln.get('cve', {})
             cve_id   = cve_data.get('id', '')
+
+            # ── FALSE-POSITIVE FILTER ──────────────────────────────────────
+            # Only keep CVEs where our target software+version is listed
+            # as VULNERABLE in the CPE configurations. NVD's cpeName query
+            # returns CVEs where the CPE appears anywhere — including as a
+            # non-vulnerable environment (e.g. "runs on Apache"). This
+            # filter ensures we only report real vulnerabilities.
+            if not _cve_affects_software(cve_data, vendor, product, version):
+                logger.debug("Filtering false positive: %s does not affect %s %s",
+                             cve_id, name, version)
+                continue
 
             # Get CVSS score (try v3.1 first, fall back to v2)
             cvss_score    = None
@@ -335,6 +455,76 @@ def query_nvd_for_component(name: str, version: str) -> list:
         return []
 
 
+# ─── EPSS batch enrichment ─────────────────────────────────────────────────────
+
+def query_epss_batch(cve_ids: list) -> dict:
+    """
+    Query the EPSS API for a list of CVE IDs in batches of 100.
+    Returns a mapping: { cve_id: {'epss': float, 'percentile': float} }
+    Silently returns partial or empty results on error.
+    """
+    out = {}
+    if not cve_ids:
+        return out
+
+    for i in range(0, len(cve_ids), EPSS_BATCH_SIZE):
+        batch = cve_ids[i:i + EPSS_BATCH_SIZE]
+        params = [('cve', cid) for cid in batch]
+        try:
+            resp = requests.get(EPSS_API_URL, params=params, timeout=REQUEST_TIMEOUT)
+            if resp.status_code != 200:
+                logger.warning("EPSS API returned %d", resp.status_code)
+                continue
+            for row in resp.json().get('data', []):
+                cid = row.get('cve')
+                if not cid:
+                    continue
+                try:
+                    out[cid] = {
+                        'epss':       float(row.get('epss', 0) or 0),
+                        'percentile': float(row.get('percentile', 0) or 0),
+                    }
+                except (TypeError, ValueError):
+                    continue
+        except requests.exceptions.Timeout:
+            logger.warning("EPSS API timeout for batch starting at %d", i)
+        except Exception as e:
+            logger.warning("EPSS API error: %s", str(e))
+
+    return out
+
+
+# ─── CISA KEV catalog ──────────────────────────────────────────────────────────
+
+def load_kev_catalog() -> set:
+    """
+    Download and cache the CISA Known Exploited Vulnerabilities catalog.
+    Returns a set of CVE IDs that are known to be actively exploited in the wild.
+    Cached in-process for the worker's lifetime.
+    """
+    global _kev_cache
+    if _kev_cache is not None:
+        return _kev_cache
+
+    try:
+        resp = requests.get(CISA_KEV_URL, timeout=REQUEST_TIMEOUT)
+        if resp.status_code != 200:
+            logger.warning("CISA KEV feed returned %d", resp.status_code)
+            _kev_cache = set()
+        else:
+            data = resp.json()
+            _kev_cache = {
+                v.get('cveID') for v in data.get('vulnerabilities', [])
+                if v.get('cveID')
+            }
+            logger.info("CISA KEV catalog loaded: %d entries", len(_kev_cache))
+    except Exception as e:
+        logger.warning("Failed to load CISA KEV catalog: %s", str(e))
+        _kev_cache = set()
+
+    return _kev_cache
+
+
 # ─── Public API ────────────────────────────────────────────────────────────────
 
 def enrich_with_cves(scan_data_list: list) -> dict:
@@ -371,25 +561,57 @@ def enrich_with_cves(scan_data_list: list) -> dict:
         total_cves += len(cves)
         enriched.append(component)
 
-        # Convert CVEs to findings format
-        for cve in cves:
+    # ── Batch enrich with EPSS exploit-prediction scores ──────────────────────
+    all_cve_ids = [c['cve_id'] for comp in enriched for c in comp['cves'] if c.get('cve_id')]
+    epss_map    = query_epss_batch(all_cve_ids)
+    kev_set     = load_kev_catalog()
+
+    for comp in enriched:
+        for cve in comp['cves']:
+            cid = cve.get('cve_id')
+            ep = epss_map.get(cid)
+            if ep:
+                cve['epss']             = ep['epss']
+                cve['epss_percentile']  = ep['percentile']
+            if cid in kev_set:
+                cve['known_exploited'] = True
+                cve['kev_url'] = 'https://www.cisa.gov/known-exploited-vulnerabilities-catalog'
+
+    # Convert CVEs to findings format
+    for component in enriched:
+        for cve in component['cves']:
             if cve.get('severity') in ('critical', 'high', 'medium'):
+                epss_str = ''
+                if cve.get('epss') is not None:
+                    epss_str = (
+                        f" EPSS: {cve['epss']:.4f} "
+                        f"(percentile: {cve.get('epss_percentile', 0):.2%})"
+                    )
+                kev_str = ''
+                if cve.get('known_exploited'):
+                    kev_str = ' [CISA KEV — actively exploited in the wild]'
+
                 findings.append({
-                    'title':          f'{cve["cve_id"]}: {component["name"].title()} {component["version"]} Vulnerable',
+                    'title':          f'{cve["cve_id"]}: {component["name"].title()} {component["version"]} Vulnerable{kev_str}',
                     'severity':       cve['severity'],
-                    'description':    f'{cve["description"]} (CVSS: {cve["cvss_score"]})',
+                    'description':    f'{cve["description"]} (CVSS: {cve["cvss_score"]}){epss_str}{kev_str}',
                     'impact':         _get_cve_impact(cve['severity']),
                     'recommendation': (
                         f'Update {component["name"].title()} to the latest stable version. '
                         f'See {cve["nvd_url"]} for patch information.'
+                        + (f' CISA KEV listing: {cve["kev_url"]}' if cve.get('known_exploited') else '')
                     ),
                     'evidence':       (
                         f'{component["name"].title()} {component["version"]} detected via {component["source"]}. '
                         f'CVE: {cve["cve_id"]} | CVSS: {cve["cvss_score"]} | Vector: {cve.get("cvss_vector", "N/A")}'
+                        + epss_str + kev_str
                     ),
                     'tool':           'cve_enricher',
                     'cve_id':         cve['cve_id'],
                     'cvss_score':     cve['cvss_score'],
+                    'epss':           cve.get('epss'),
+                    'epss_percentile': cve.get('epss_percentile'),
+                    'known_exploited': cve.get('known_exploited', False),
                     'nvd_url':        cve['nvd_url'],
                 })
 
