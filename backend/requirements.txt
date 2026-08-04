@@ -13,6 +13,13 @@ gunicorn==22.0.0
 whitenoise==6.7.0
 # Report generation
 weasyprint==62.3
+pydyf<0.11
 Jinja2==3.1.4
 # AI interpretation
-google-generativeai==0.7.2
+google-generativeai>=0.8.0
+django-csp
+django-celery-beat
+# Object storage for PDF reports (S3 / R2 / MinIO). Loaded conditionally in
+# settings when AWS_STORAGE_BUCKET_NAME is set.
+django-storages>=1.14
+boto3>=1.28

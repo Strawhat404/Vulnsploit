@@ -29,6 +29,7 @@ services:
     working_dir: /app
     volumes:
       - ./backend:/app    # live code reload in dev
+      - media_data:/app/media    # persist generated PDFs across rebuilds
     env_file:
       - ./backend/.env    # loads SECRET_KEY, DEBUG, ALLOWED_HOSTS, etc.
     depends_on:
@@ -46,6 +47,31 @@ services:
     working_dir: /app
     volumes:
       - ./backend:/app
+      - media_data:/app/media    # worker also writes PDFs
+    env_file:
+      - ./backend/.env
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A Vulnsploit inspect ping -d celery@$$HOSTNAME || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_started
+
+  # ─── Celery Beat (scheduled scans) ─────────────────────────────────────────
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vulnsploit-beat
+    restart: unless-stopped
+    command: celery -A Vulnsploit beat --loglevel=info
+    working_dir: /app
+    volumes:
+      - ./backend:/app
     env_file:
       - ./backend/.env
     depends_on:
@@ -53,3 +79,6 @@ services:
         condition: service_healthy
       backend:
         condition: service_started
+
+volumes:
+  media_data:
