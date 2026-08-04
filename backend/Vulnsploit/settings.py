@@ -48,6 +48,8 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework_simplejwt',
     'corsheaders',
+    'csp',
+    'django_celery_beat',
     'scanner',
 ]
 
@@ -61,7 +63,8 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    'Vulnsploit.middleware.ContentSecurityPolicyMiddleware',
+    'csp.middleware.CSPMiddleware',
+    'Vulnsploit.middleware.AuditLogMiddleware',
 ]
 
 
@@ -146,19 +149,77 @@ USE_TZ        = True
 
 STATIC_URL  = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'   # collectstatic writes here
-STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Media files (uploaded reports, etc.)
-MEDIA_URL  = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+MEDIA_URL  = config('MEDIA_URL', default='/media/')
+MEDIA_ROOT = config('MEDIA_ROOT', default=str(BASE_DIR / 'media'))
 
-# Media files — PDF reports stored here
-MEDIA_URL  = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+# ─── OBJECT STORAGE (S3 / R2 / compatible) ─────────────────────────────────────
+# When AWS_STORAGE_BUCKET_NAME is set, media (PDF reports) are uploaded to S3/R2
+# via django-storages instead of the local filesystem. This prevents PDF loss on
+# ephemeral filesystems (Render free tier redeploys) and enables multi-instance
+# backend deployments. Falls back to local filesystem storage when unset.
+
+_aws_bucket = config('AWS_STORAGE_BUCKET_NAME', default='')
+if _aws_bucket:
+    INSTALLED_APPS.append('storages')
+
+    AWS_STORAGE_BUCKET_NAME = _aws_bucket
+    AWS_S3_REGION_NAME      = config('AWS_S3_REGION_NAME', default='us-east-1')
+    # R2 / MinIO / custom endpoint override (leave blank for AWS S3)
+    AWS_S3_ENDPOINT_URL     = config('AWS_S3_ENDPOINT_URL', default='')
+    AWS_ACCESS_KEY_ID        = config('AWS_ACCESS_KEY_ID', default='')
+    AWS_SECRET_ACCESS_KEY    = config('AWS_SECRET_ACCESS_KEY', default='')
+    AWS_QUERYSTRING_AUTH     = True   # generate pre-signed URLs for downloads
+    AWS_DEFAULT_ACL          = 'private'
+    AWS_S3_FILE_OVERWRITE    = False
+
+    STORAGES = {
+        'default':     {'BACKEND': 'storages.backends.s3.S3Storage'},
+        'staticfiles': {'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage'},
+    }
+else:
+    STORAGES = {
+        'default':     {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+        'staticfiles': {'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage'},
+    }
 
 # OpenAI
 OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
+
+# ─── EMAIL ──────────────────────────────────────────────────────────────────────
+
+SITE_URL = config('SITE_URL', default='http://localhost:5173')
+DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='noreply@vulnsploit.com')
+
+EMAIL_BACKEND = config('EMAIL_BACKEND', default='django.core.mail.backends.smtp.EmailBackend')
+EMAIL_HOST = config('EMAIL_HOST', default='')
+EMAIL_PORT = config('EMAIL_PORT', default=587, cast=int)
+EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')
+EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
+EMAIL_USE_TLS = config('EMAIL_USE_TLS', default=True, cast=bool)
+
+
+# ─── CONTENT SECURITY POLICY ────────────────────────────────────────────────────
+
+CSP_DEFAULT_SRC = ("'self'",)
+CSP_SCRIPT_SRC = ("'self'",)
+CSP_STYLE_SRC = ("'self'", "'unsafe-inline'")
+CSP_IMG_SRC = ("'self'", "data:")
+CSP_FONT_SRC = ("'self'",)
+CSP_CONNECT_SRC = ("'self'",)
+
+
+# ─── SIMPLE JWT ─────────────────────────────────────────────────────────────────
+
+from datetime import timedelta
+
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'ROTATE_REFRESH_TOKENS': True,
+}
 
 
 # ─── CELERY ────────────────────────────────────────────────────────────────────
@@ -187,6 +248,7 @@ if _broker_url.startswith('rediss://'):
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'scanner.auth.APIKeyAuthentication',
     ),
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
@@ -197,7 +259,7 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_THROTTLE_RATES': {
         'anon': '20/hour',
-        'user': '100/hour',
+        'user': '1000/hour',
     },
 }
 
@@ -213,8 +275,8 @@ GEMINI_API_KEY = config('GEMINI_API_KEY', default=None)
 # django-ratelimit cache backend
 RATELIMIT_USE_CACHE = 'default'
 
-_redis_url = config('CELERY_BROKER_URL', default='redis://redis:6379/0')
-if _redis_url.startswith('redis://') or _redis_url.startswith('rediss://'):
+_redis_url = config('REDIS_URL', default='')
+if _redis_url:
     CACHES = {
         'default': {
             'BACKEND': 'django.core.cache.backends.redis.RedisCache',

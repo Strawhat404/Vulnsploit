@@ -1,5 +1,97 @@
 from rest_framework import serializers
-from .models import ScanResult, ReconSession, ScanReport
+from django.contrib.auth.models import User
+from .models import (
+    UserProfile, APIKey, Target, ScheduledScan, ScanResult, ReconSession, ScanReport,
+    Organization, OrganizationMember, AuditLog,
+)
+
+
+# ─── Organization serialization ────────────────────────────────────────────────
+
+class OrganizationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = Organization
+        fields = ['id', 'name', 'slug', 'owner', 'created_at']
+        read_only_fields = ['id', 'owner', 'created_at']
+
+
+class OrganizationMemberSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(source='user.username', read_only=True)
+
+    class Meta:
+        model  = OrganizationMember
+        fields = ['id', 'organization', 'user', 'username', 'role', 'joined_at']
+        read_only_fields = ['id', 'username', 'joined_at']
+
+
+class AuditLogSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(source='user.username', read_only=True, default='')
+
+    class Meta:
+        model  = AuditLog
+        fields = ['id', 'username', 'organization', 'action', 'resource_type',
+                  'resource_id', 'ip_address', 'user_agent', 'metadata', 'created_at']
+        read_only_fields = fields
+
+
+class TargetSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = Target
+        fields = [
+            'id', 'name', 'value', 'target_type', 'tags',
+            'notes', 'organization', 'created_at', 'last_scanned_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'last_scanned_at']
+
+
+class ProfileSerializer(serializers.ModelSerializer):
+    email = serializers.EmailField(source='user.email', required=False)
+    username = serializers.CharField(source='user.username', read_only=True)
+
+    class Meta:
+        model  = UserProfile
+        fields = ['username', 'email', 'notify_scan_complete', 'notify_report_ready']
+
+    def update(self, instance, validated_data):
+        user_data = validated_data.pop('user', {})
+        if 'email' in user_data:
+            instance.user.email = user_data['email']
+            instance.user.save()
+        return super().update(instance, validated_data)
+
+
+class ScheduledScanSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = ScheduledScan
+        fields = ['id', 'target', 'scan_type', 'cron', 'is_active', 'organization',
+                  'last_run_at', 'next_run_at', 'created_at']
+        read_only_fields = ['id', 'last_run_at', 'next_run_at', 'created_at']
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    old_password = serializers.CharField(required=True)
+    new_password = serializers.CharField(min_length=8, required=True)
+
+
+class CreateAPIKeySerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=100)
+
+    def create(self, validated_data):
+        request = self.context.get('request')
+        obj, raw = APIKey.create_key(user=request.user, name=validated_data['name'])
+        self._raw_key = raw
+        return obj
+
+    @property
+    def raw_key(self):
+        return getattr(self, '_raw_key', None)
+
+
+class APIKeySerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = APIKey
+        fields = ['id', 'name', 'prefix', 'is_active', 'last_used_at', 'created_at']
+        read_only_fields = ['id', 'prefix', 'last_used_at', 'created_at']
 
 
 class ScanResultSerializer(serializers.ModelSerializer):
@@ -9,8 +101,8 @@ class ScanResultSerializer(serializers.ModelSerializer):
         model  = ScanResult
         fields = [
             'id', 'username', 'target', 'scan_type', 'status',
-            'result', 'result_json', 'created_at', 'completed_at',
-            'recon_session',
+            'result', 'result_json', 'organization', 'created_at',
+            'completed_at', 'recon_session',
         ]
         read_only_fields = [
             'id', 'username', 'status', 'result', 'result_json',
@@ -66,8 +158,12 @@ class ScanReportSerializer(serializers.ModelSerializer):
     def get_pdf_url(self, obj):
         if obj.pdf_file:
             request = self.context.get('request')
-            if request:
-                return request.build_absolute_uri(f'/media/{obj.pdf_file}')
+            url = obj.pdf_file.url
+            # Local filesystem returns a relative '/media/...' path — absolutize it.
+            # Remote storage (S3/R2) returns a fully-qualified pre-signed URL.
+            if request and url.startswith('/'):
+                return request.build_absolute_uri(url)
+            return url
         return None
 
 
@@ -94,7 +190,9 @@ class RegisterSerializer(serializers.Serializer):
 
     def create(self, validated_data):
         from django.contrib.auth.models import User
-        return User.objects.create_user(
+        user = User.objects.create_user(
             username=validated_data['username'],
             password=validated_data['password'],
         )
+        UserProfile.objects.get_or_create(user=user)
+        return user
