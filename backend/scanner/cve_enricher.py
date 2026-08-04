@@ -25,6 +25,9 @@ EPSS_API_URL = 'https://api.first.org/data/v1/epss'
 # CISA Known Exploited Vulnerabilities (KEV) catalog feed
 CISA_KEV_URL = 'https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json'
 
+# Exploit-DB search URL — checks if a public exploit/PoC exists for a CVE
+EXPLOITDB_API_URL = 'https://www.exploit-db.com/search'
+
 # Request timeout
 REQUEST_TIMEOUT = 10
 
@@ -36,9 +39,6 @@ NVD_FETCH_PER_PAGE = 50
 
 # Max CVEs to return per software component AFTER filtering
 MAX_CVES_PER_COMPONENT = 5
-
-# Max CVE IDs per single EPSS batch request (EPSS allows up to 100)
-EPSS_BATCH_SIZE = 100
 
 # In-process cache of the CISA KEV catalog (set of CVE IDs)
 _kev_cache = None
@@ -431,6 +431,18 @@ def query_nvd_for_component(name: str, version: str) -> list:
             # Published date
             published = cve_data.get('published', '')[:10]  # YYYY-MM-DD
 
+            # ── CWE extraction ─────────────────────────────────────────────
+            # NVD provides CWE IDs in the 'weaknesses' array — we extract
+            # them so the report can map findings to OWASP/CWE categories.
+            cwe_ids = []
+            for weakness in cve_data.get('weaknesses', []):
+                for desc in weakness.get('description', []):
+                    cwe = desc.get('value', '')
+                    if cwe.startswith('CWE-'):
+                        cwe_ids.append(cwe)
+            # Deduplicate
+            cwe_ids = list(dict.fromkeys(cwe_ids))[:5]
+
             cves.append({
                 'cve_id':       cve_id,
                 'cvss_score':   cvss_score,
@@ -441,6 +453,7 @@ def query_nvd_for_component(name: str, version: str) -> list:
                 'published':    published,
                 'nvd_url':      f'https://nvd.nist.gov/vuln/detail/{cve_id}',
                 'software':     f'{name} {version}',
+                'cwe_ids':      cwe_ids,
             })
 
         # Sort by CVSS score descending
@@ -525,6 +538,54 @@ def load_kev_catalog() -> set:
     return _kev_cache
 
 
+# ─── Exploit-DB availability check ─────────────────────────────────────────────
+
+def check_exploit_db(cve_ids: list) -> dict:
+    """
+    Check Exploit-DB for public exploits / proof-of-concept code for
+    the given CVE IDs. Returns a mapping: { cve_id: True/False }.
+
+    Uses the Exploit-DB search API. If the API is unreachable or returns
+    an error, all CVEs are marked as 'unknown' (None) rather than False
+    so we don't give false confidence.
+    """
+    out = {cid: None for cid in cve_ids}
+    if not cve_ids:
+        return out
+
+    headers = {
+        'Accept': 'application/json',
+        'User-Agent': 'VulnSploit/1.0',
+    }
+
+    for cve_id in cve_ids:
+        try:
+            resp = requests.get(
+                EXPLOITDB_API_URL,
+                params={'q': cve_id, 'cve': cve_id},
+                headers=headers,
+                timeout=REQUEST_TIMEOUT,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                # Exploit-DB returns a list of exploits in 'data'
+                exploits = data.get('data', [])
+                if isinstance(exploits, list) and len(exploits) > 0:
+                    out[cve_id] = True
+                else:
+                    out[cve_id] = False
+            else:
+                logger.debug("Exploit-DB returned %d for %s", resp.status_code, cve_id)
+        except Exception as e:
+            logger.debug("Exploit-DB check failed for %s: %s", cve_id, str(e))
+
+    found = sum(1 for v in out.values() if v is True)
+    if found:
+        logger.info("Exploit-DB: %d/%d CVEs have public exploits", found, len(cve_ids))
+
+    return out
+
+
 # ─── Public API ────────────────────────────────────────────────────────────────
 
 def enrich_with_cves(scan_data_list: list) -> dict:
@@ -565,6 +626,7 @@ def enrich_with_cves(scan_data_list: list) -> dict:
     all_cve_ids = [c['cve_id'] for comp in enriched for c in comp['cves'] if c.get('cve_id')]
     epss_map    = query_epss_batch(all_cve_ids)
     kev_set     = load_kev_catalog()
+    exploit_map = check_exploit_db(all_cve_ids)
 
     for comp in enriched:
         for cve in comp['cves']:
@@ -576,6 +638,8 @@ def enrich_with_cves(scan_data_list: list) -> dict:
             if cid in kev_set:
                 cve['known_exploited'] = True
                 cve['kev_url'] = 'https://www.cisa.gov/known-exploited-vulnerabilities-catalog'
+            if exploit_map.get(cid) is True:
+                cve['public_exploit'] = True
 
     # Convert CVEs to findings format
     for component in enriched:
@@ -590,11 +654,14 @@ def enrich_with_cves(scan_data_list: list) -> dict:
                 kev_str = ''
                 if cve.get('known_exploited'):
                     kev_str = ' [CISA KEV — actively exploited in the wild]'
+                exploit_str = ''
+                if cve.get('public_exploit'):
+                    exploit_str = ' [Public exploit available on Exploit-DB]'
 
                 findings.append({
-                    'title':          f'{cve["cve_id"]}: {component["name"].title()} {component["version"]} Vulnerable{kev_str}',
+                    'title':          f'{cve["cve_id"]}: {component["name"].title()} {component["version"]} Vulnerable{kev_str}{exploit_str}',
                     'severity':       cve['severity'],
-                    'description':    f'{cve["description"]} (CVSS: {cve["cvss_score"]}){epss_str}{kev_str}',
+                    'description':    f'{cve["description"]} (CVSS: {cve["cvss_score"]}){epss_str}{kev_str}{exploit_str}',
                     'impact':         _get_cve_impact(cve['severity']),
                     'recommendation': (
                         f'Update {component["name"].title()} to the latest stable version. '
@@ -604,7 +671,7 @@ def enrich_with_cves(scan_data_list: list) -> dict:
                     'evidence':       (
                         f'{component["name"].title()} {component["version"]} detected via {component["source"]}. '
                         f'CVE: {cve["cve_id"]} | CVSS: {cve["cvss_score"]} | Vector: {cve.get("cvss_vector", "N/A")}'
-                        + epss_str + kev_str
+                        + epss_str + kev_str + exploit_str
                     ),
                     'tool':           'cve_enricher',
                     'cve_id':         cve['cve_id'],
@@ -612,6 +679,8 @@ def enrich_with_cves(scan_data_list: list) -> dict:
                     'epss':           cve.get('epss'),
                     'epss_percentile': cve.get('epss_percentile'),
                     'known_exploited': cve.get('known_exploited', False),
+                    'public_exploit':  cve.get('public_exploit', False),
+                    'cwe_ids':         cve.get('cwe_ids', []),
                     'nvd_url':        cve['nvd_url'],
                 })
 

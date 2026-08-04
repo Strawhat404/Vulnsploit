@@ -10,12 +10,14 @@ from .views import (
     ScheduledScanListCreateView, ScheduledScanDetailView,
     CancelScanView, CancelReconView,
     OrganizationViewSet, OrganizationMemberViewSet, AuditLogListView,
+    ReportCompareView, WebhookEndpointViewSet,
 )
 
 router = DefaultRouter()
 router.register(r'targets', TargetViewSet, basename='target')
 router.register(r'organizations', OrganizationViewSet, basename='organization')
 router.register(r'organization-members', OrganizationMemberViewSet, basename='organization-member')
+router.register(r'webhooks', WebhookEndpointViewSet, basename='webhook')
 
 urlpatterns = [
     path('', include(router.urls)),
@@ -37,6 +39,9 @@ urlpatterns = [
 
     # Audit logs
     path('audit-logs/',                  AuditLogListView.as_view(),          name='audit-log-list'),
+
+    # Report comparison
+    path('reports/compare/',             ReportCompareView.as_view(),         name='report-compare'),
 
     # Auth
     path('register/',                   RegisterView.as_view(),              name='register'),

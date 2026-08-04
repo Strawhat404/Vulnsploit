@@ -283,6 +283,18 @@ def generate_report(self, session_id=None, scan_ids=None, report_id=None):
         interpreted['cve_components'] = cve_data.get('components', [])
         interpreted['total_cves']     = cve_data.get('total_cves', 0)
 
+        # ── Compliance mapping — tag findings with OWASP + CWE categories ──
+        from .compliance import enrich_findings_with_compliance, get_compliance_summary
+        enrich_findings_with_compliance(interpreted['findings'])
+        interpreted['compliance_summary'] = get_compliance_summary(interpreted['findings'])
+
+        # ── Security posture score (0-100, higher = better) ──
+        from .posture import calculate_posture_score
+        interpreted['posture_score'] = calculate_posture_score(
+            interpreted['severity_counts'],
+            interpreted['total_findings'],
+        )
+
         # Generate PDF (writes to MEDIA_ROOT/reports/<filename> locally)
         pdf_rel_path = render_pdf(report.id, target, interpreted, user, scans)
 
@@ -316,8 +328,71 @@ def generate_report(self, session_id=None, scan_ids=None, report_id=None):
         logger.info("Report %s generated | target=%s findings=%d",
                     report.id, target, interpreted['total_findings'])
 
-        from .notifications import send_report_ready_email
+        from .notifications import send_report_ready_email, send_webhook_alerts
         send_report_ready_email(user, report)
+        send_webhook_alerts(user, 'report.ready', {
+            'target': target, 'report_id': report.id,
+            'risk_level': report.risk_level,
+        })
+
+        # ── Change detection: compare with previous report for same target ──
+        prev_report = ScanReport.objects.filter(
+            target=target,
+            status='ready',
+        ).exclude(id=report.id).order_by('-generated_at').first()
+
+        if prev_report and prev_report.findings_json:
+            from .diff import compare_reports
+            from .posture import calculate_posture_score
+
+            diff = compare_reports(
+                prev_report.findings_json or [],
+                report.findings_json or [],
+            )
+
+            # Alert on new critical findings
+            if diff['new_critical_count'] > 0:
+                send_webhook_alerts(user, 'finding.new_critical', {
+                    'target': target,
+                    'report_id': report.id,
+                    'count': diff['new_critical_count'],
+                    'findings': diff['new_findings'][:10],
+                })
+                logger.warning(
+                    "Change detection: %d new CRITICAL findings on %s",
+                    diff['new_critical_count'], target,
+                )
+
+            # Alert on new high findings
+            if diff['new_high_count'] > 0:
+                send_webhook_alerts(user, 'finding.new_high', {
+                    'target': target,
+                    'report_id': report.id,
+                    'count': diff['new_high_count'],
+                    'findings': diff['new_findings'][:10],
+                })
+
+            # Alert on posture score change
+            old_score = calculate_posture_score(
+                prev_report.severity_counts or {},
+                len(prev_report.findings_json or []),
+            )
+            new_score = interpreted['posture_score']
+            if old_score != new_score:
+                send_webhook_alerts(user, 'posture.changed', {
+                    'target': target,
+                    'report_id': report.id,
+                    'old_score': old_score,
+                    'new_score': new_score,
+                })
+
+            logger.info(
+                "Change detection: %s | new=%d resolved=%d unchanged=%d posture %d→%d",
+                target, len(diff['new_findings']),
+                len(diff['resolved_findings']),
+                len(diff['unchanged_findings']),
+                old_score, new_score,
+            )
 
         return f"Report {report.id} generated"
 

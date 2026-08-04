@@ -2,7 +2,7 @@ from rest_framework import serializers
 from django.contrib.auth.models import User
 from .models import (
     UserProfile, APIKey, Target, ScheduledScan, ScanResult, ReconSession, ScanReport,
-    Organization, OrganizationMember, AuditLog,
+    Organization, OrganizationMember, AuditLog, WebhookEndpoint,
 )
 
 
@@ -34,11 +34,20 @@ class AuditLogSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class WebhookEndpointSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = WebhookEndpoint
+        fields = ['id', 'name', 'url', 'secret', 'events', 'is_active',
+                  'organization', 'last_triggered_at', 'created_at']
+        read_only_fields = ['id', 'last_triggered_at', 'created_at']
+        extra_kwargs = {'secret': {'write_only': True}}
+
+
 class TargetSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Target
         fields = [
-            'id', 'name', 'value', 'target_type', 'tags',
+            'id', 'name', 'value', 'target_type', 'criticality', 'tags',
             'notes', 'organization', 'created_at', 'last_scanned_at',
         ]
         read_only_fields = ['id', 'created_at', 'last_scanned_at']

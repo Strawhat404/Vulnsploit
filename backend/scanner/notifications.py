@@ -1,7 +1,14 @@
 import logging
+import json
+import hmac
+import hashlib
 from django.conf import settings
 from django.core.mail import send_mail
-from .models import UserProfile
+from django.db import models as dj_models
+from django.utils import timezone
+import requests as http_requests
+
+from .models import UserProfile, WebhookEndpoint
 
 logger = logging.getLogger('scanner')
 
@@ -50,3 +57,110 @@ def send_report_ready_email(user, report):
         logger.info("Notification sent to %s for report %s", user.email, report.id)
     except Exception as e:
         logger.warning("Failed to send email to %s: %s", user.email, str(e))
+
+
+# ─── Webhook delivery ──────────────────────────────────────────────────────────
+
+def _get_user_orgs_qs(user):
+    """Return the queryset of Org IDs the user belongs to."""
+    from .models import Organization
+    return Organization.objects.filter(memberships__user=user).values_list('id', flat=True)
+
+
+def _deliver_webhook(webhook, event, payload):
+    """
+    Deliver a single webhook with HMAC signature.
+    The signature is placed in X-VulnSploit-Signature as hex sha256.
+    """
+    body = json.dumps({
+        'event':  event,
+        'payload': payload,
+    })
+
+    signature = hmac.new(
+        webhook.secret.encode(),
+        body.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+    headers = {
+        'Content-Type':           'application/json',
+        'X-VulnSploit-Signature': f'sha256={signature}',
+        'X-VulnSploit-Event':     event,
+        'User-Agent':             'VulnSploit/1.0',
+    }
+
+    # Slack-compatible format: if the URL is a Slack webhook, wrap in
+    # their required { "text": "..." } envelope. Otherwise send raw JSON.
+    if 'hooks.slack.com' in webhook.url:
+        body = json.dumps({'text': _format_slack_message(event, payload)})
+    elif 'discord.com/api/webhooks' in webhook.url:
+        body = json.dumps({'content': _format_slack_message(event, payload)})
+
+    try:
+        resp = http_requests.post(
+            webhook.url, data=body, headers=headers, timeout=10,
+        )
+        if resp.status_code in (200, 204):
+            logger.info("Webhook %s delivered: %s (HTTP %s)", webhook.id, event, resp.status_code)
+        else:
+            logger.warning("Webhook %s returned %s for event %s", webhook.id, resp.status_code, event)
+    except Exception as e:
+        logger.warning("Webhook %s delivery failed: %s", webhook.id, str(e))
+
+    webhook.last_triggered_at = timezone.now()
+    webhook.save(update_fields=['last_triggered_at'])
+
+
+def _format_slack_message(event, payload):
+    """Format a human-readable alert message for Slack/Discord."""
+    if event == 'finding.new_critical':
+        return (
+            f":rotating_light: *{payload.get('count', 0)} new CRITICAL findings* detected "
+            f"on `{payload.get('target', '?')}`.\n"
+            f"Report: {settings.SITE_URL}/reports/{payload.get('report_id', '')}"
+        )
+    elif event == 'finding.new_high':
+        return (
+            f":warning: *{payload.get('count', 0)} new HIGH findings* detected "
+            f"on `{payload.get('target', '?')}`.\n"
+            f"Report: {settings.SITE_URL}/reports/{payload.get('report_id', '')}"
+        )
+    elif event == 'posture.changed':
+        return (
+            f":chart_with_downwards_trend: Security posture changed for "
+            f"`{payload.get('target', '?')}`: "
+            f"{payload.get('old_score', '?')} → {payload.get('new_score', '?')}"
+        )
+    elif event == 'report.ready':
+        return (
+            f":page_facing_up: Report ready for `{payload.get('target', '?')}` "
+            f"(risk: {payload.get('risk_level', '?')})\n"
+            f"View: {settings.SITE_URL}/reports/{payload.get('report_id', '')}"
+        )
+    return f"VulnSploit alert: {event}"
+
+
+def send_webhook_alerts(user, event, payload):
+    """
+    Fire webhooks that are subscribed to the given event.
+    Finds all active webhooks owned by the user (or their orgs) that
+    list 'event' in their events array.
+    """
+    user_orgs = list(_get_user_orgs_qs(user))
+    webhooks = WebhookEndpoint.objects.filter(
+        is_active=True,
+    ).filter(
+        dj_models.Q(organization__id__in=user_orgs) |
+        dj_models.Q(organization__isnull=True, user=user),
+    )
+
+    delivered = 0
+    for wh in webhooks:
+        if event in (wh.events or []):
+            _deliver_webhook(wh, event, payload)
+            delivered += 1
+
+    if delivered:
+        logger.info("Delivered %d webhooks for event %s", delivered, event)
+    return delivered

@@ -16,14 +16,14 @@ from django.utils.decorators import method_decorator
 
 from .models import (
     UserProfile, APIKey, Target, ScheduledScan, ScanResult, ReconSession, ScanReport,
-    Organization, OrganizationMember, AuditLog,
+    Organization, OrganizationMember, AuditLog, WebhookEndpoint,
 )
 from .serializers import (
     TargetSerializer, ScanResultSerializer, ReconSessionSerializer,
     ScanReportSerializer, RegisterSerializer, ProfileSerializer,
     ChangePasswordSerializer, CreateAPIKeySerializer, APIKeySerializer,
     ScheduledScanSerializer, OrganizationSerializer, OrganizationMemberSerializer,
-    AuditLogSerializer,
+    AuditLogSerializer, WebhookEndpointSerializer,
 )
 from .tasks import execute_scan, execute_full_recon, generate_report
 from .validators import validate_target, validate_scan_type
@@ -126,13 +126,29 @@ class UserStatsView(APIView):
 
     def get(self, request):
         scans = org_scoped_queryset(ScanResult, request.user)
+        reports = org_scoped_queryset(ScanReport, request.user)
+
+        # Calculate posture score from the most recent report
+        posture_score = None
+        posture_grade = None
+        latest_report = reports.filter(status='ready').order_by('-generated_at').first()
+        if latest_report and latest_report.severity_counts:
+            from .posture import calculate_posture_score, posture_grade as _pg
+            posture_score = calculate_posture_score(
+                latest_report.severity_counts,
+                len(latest_report.findings_json or []),
+            )
+            posture_grade = _pg(posture_score)
+
         return Response({
             'total': scans.count(),
             'completed': scans.filter(status='completed').count(),
             'running': scans.filter(status__in=['running', 'pending']).count(),
             'failed': scans.filter(status='failed').count(),
             'recon_sessions': org_scoped_queryset(ReconSession, request.user).count(),
-            'reports': org_scoped_queryset(ScanReport, request.user).count(),
+            'reports': reports.count(),
+            'posture_score': posture_score,
+            'posture_grade': posture_grade,
         })
 
 
@@ -656,3 +672,75 @@ class AuditLogListView(generics.ListAPIView):
             dj_models.Q(organization__in=user_orgs) |
             dj_models.Q(organization__isnull=True, user=self.request.user)
         )
+
+
+# ─── Report Comparison ────────────────────────────────────────────────────────
+
+class ReportCompareView(APIView):
+    """
+    GET /api/reports/compare/?report_a=<id>&report_b=<id>
+    Returns a diff of the two reports' findings.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        a_id = request.query_params.get('report_a')
+        b_id = request.query_params.get('report_b')
+
+        if not a_id or not b_id:
+            return Response(
+                {'detail': 'Both report_a and report_b query params are required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        qs = org_scoped_queryset(ScanReport, request.user)
+        try:
+            report_a = qs.get(id=int(a_id))
+            report_b = qs.get(id=int(b_id))
+        except (ScanReport.DoesNotExist, ValueError):
+            return Response(
+                {'detail': 'One or both reports not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        from .diff import compare_reports
+        diff = compare_reports(
+            report_a.findings_json or [],
+            report_b.findings_json or [],
+        )
+
+        # Add posture scores for context
+        from .posture import calculate_posture_score, posture_grade, posture_label
+        for label, report in [('report_a', report_a), ('report_b', report_b)]:
+            if report.severity_counts:
+                score = calculate_posture_score(
+                    report.severity_counts,
+                    len(report.findings_json or []),
+                )
+                diff[f'{label}_posture_score']  = score
+                diff[f'{label}_posture_grade']  = posture_grade(score)
+                diff[f'{label}_posture_label']  = posture_label(score)
+
+        return Response(diff)
+
+
+# ─── Webhook Endpoints ─────────────────────────────────────────────────────────
+
+class WebhookEndpointViewSet(viewsets.ModelViewSet):
+    """CRUD for webhook endpoints (Slack/Teams/Discord/alerting)."""
+    serializer_class   = WebhookEndpointSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        user_orgs = get_user_orgs(self.request.user)
+        return WebhookEndpoint.objects.filter(
+            dj_models.Q(organization__in=user_orgs) |
+            dj_models.Q(organization__isnull=True, user=self.request.user)
+        )
+
+    def perform_create(self, serializer):
+        import secrets as _secrets
+        # Auto-generate HMAC secret if not provided
+        if not serializer.validated_data.get('secret'):
+            serializer.validated_data['secret'] = _secrets.token_hex(32)
+        serializer.save(user=self.request.user, organization=resolve_org(self.request))
