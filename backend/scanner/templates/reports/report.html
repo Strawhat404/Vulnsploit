@@ -506,6 +506,45 @@
 
 
 <!-- ══════════════════════════════════════════════════════════════
+     ATTACK PATHS
+══════════════════════════════════════════════════════════════ -->
+{% if attack_paths %}
+<div class="section">
+  <div class="section-header">
+    <h2>Attack Path Analysis</h2>
+    <p>Potential exploitation chains connecting multiple findings</p>
+  </div>
+
+  {% for path in attack_paths %}
+  <div class="finding">
+    <div class="finding-header finding-header-{{ path.severity }}">
+      <div class="finding-title">{{ path.title }}</div>
+      <span class="badge badge-{{ path.severity }}">{{ path.severity }}</span>
+    </div>
+    <div class="finding-body">
+      <div class="finding-field">
+        <div class="finding-field-label">Description</div>
+        <div class="finding-field-value">{{ path.description }}</div>
+      </div>
+      <div class="finding-field">
+        <div class="finding-field-label">Exploitation Steps</div>
+        <div class="evidence-box">{% for step in path.steps %}{{ loop.index }}. {{ step }}
+{% endfor %}</div>
+      </div>
+      {% if path.findings_involved %}
+      <div class="finding-field">
+        <div class="finding-field-label">Related Findings</div>
+        <div class="finding-field-value">{% for f in path.findings_involved %}{{ f }}{% if not loop.last %}; {% endif %}{% endfor %}</div>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+
+<!-- ══════════════════════════════════════════════════════════════
      APPENDIX — RAW OUTPUT
 ══════════════════════════════════════════════════════════════ -->
 <div class="section">

@@ -5,12 +5,12 @@ URL configuration for Vulnsploit project.
 from django.contrib import admin
 from django.urls import path, include
 from django.http import JsonResponse
-from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from scanner.views import CookieTokenObtainPairView, CookieTokenRefreshView
 from django_ratelimit.decorators import ratelimit
 from django.utils.decorators import method_decorator
 
 
-class RateLimitedTokenView(TokenObtainPairView):
+class RateLimitedCookieTokenView(CookieTokenObtainPairView):
     @method_decorator(ratelimit(key='ip', rate='10/15m', method='POST', block=True))
     def post(self, request, *args, **kwargs):
         return super().post(request, *args, **kwargs)
@@ -24,6 +24,6 @@ urlpatterns = [
     path('admin/',               admin.site.urls),
     path('api/',                 include('scanner.urls')),
     path('api/health/',          health_check,                    name='health_check'),
-    path('api/token/',           RateLimitedTokenView.as_view(),  name='token_obtain_pair'),
-    path('api/token/refresh/',   TokenRefreshView.as_view(),      name='token_refresh'),
+    path('api/token/',           RateLimitedCookieTokenView.as_view(),  name='token_obtain_pair'),
+    path('api/token/refresh/',   CookieTokenRefreshView.as_view(),      name='token_refresh'),
 ]
