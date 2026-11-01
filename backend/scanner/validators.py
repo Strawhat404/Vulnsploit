@@ -6,6 +6,8 @@ Prevents command injection and invalid inputs from reaching the tool layer.
 import re
 from rest_framework.exceptions import ValidationError
 
+from .netguard import UnsafeTarget, assert_public_target
+
 # ─── Allowed scan types ────────────────────────────────────────────────────────
 
 VALID_SCAN_TYPES = {
@@ -52,7 +54,7 @@ _URL_RE = re.compile(
 _DANGEROUS_CHARS_RE = re.compile(r'[;&|`$<>\\\'"\n\r\t{}()\[\]]')
 
 
-def validate_target(target: str) -> str:
+def validate_target(target: str, resolve: bool = True) -> str:
     """
     Validate that the target is a safe domain, IP, CIDR, or URL.
     Raises ValidationError if invalid or potentially dangerous.
@@ -93,6 +95,14 @@ def validate_target(target: str) -> str:
         if any(int(o) > 255 for o in octets):
             raise ValidationError({'target': 'Invalid IP address — octet out of range.'})
 
+    # Never let a target point at loopback, private networks or cloud
+    # metadata. Resolves hostnames, so this also catches names that map to
+    # internal addresses.
+    try:
+        assert_public_target(clean, resolve=resolve)
+    except UnsafeTarget as exc:
+        raise ValidationError({'target': str(exc)})
+
     return clean
 
 
@@ -113,3 +123,15 @@ def validate_scan_type(scan_type: str) -> str:
         })
 
     return scan_type
+
+
+def guess_target_type(value: str) -> str:
+    """Target.TargetType value for a scan target string."""
+    v = (value or '').strip()
+    if v.lower().startswith(('http://', 'https://')):
+        return 'url'
+    if _CIDR_RE.match(v):
+        return 'cidr'
+    if _IPV4_RE.match(v):
+        return 'ip'
+    return 'domain'

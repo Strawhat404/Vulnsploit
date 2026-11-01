@@ -1,5 +1,8 @@
 from rest_framework import serializers
 from django.contrib.auth.models import User
+from .netguard import UnsafeTarget, assert_public_url
+from .validators import validate_target as _validate_target, validate_scan_type as _validate_scan_type
+from rest_framework.exceptions import ValidationError as _DRFValidationError
 from .models import (
     UserProfile, APIKey, Target, ScheduledScan, ScanResult, ReconSession, ScanReport,
     Organization, OrganizationMember, AuditLog, WebhookEndpoint, FindingStatus,
@@ -42,6 +45,13 @@ class WebhookEndpointSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'last_triggered_at', 'created_at']
         extra_kwargs = {'secret': {'write_only': True}}
 
+    def validate_url(self, value):
+        try:
+            assert_public_url(value)
+        except UnsafeTarget as exc:
+            raise serializers.ValidationError(str(exc))
+        return value
+
 
 class FindingStatusSerializer(serializers.ModelSerializer):
     username = serializers.CharField(source='user.username', read_only=True, default='')
@@ -54,13 +64,56 @@ class FindingStatusSerializer(serializers.ModelSerializer):
 
 
 class TargetSerializer(serializers.ModelSerializer):
+    verified = serializers.SerializerMethodField()
+    covered_by = serializers.SerializerMethodField()
+    verification_expires_at = serializers.SerializerMethodField()
+    verification = serializers.SerializerMethodField()
+
     class Meta:
         model  = Target
         fields = [
             'id', 'name', 'value', 'target_type', 'criticality', 'tags',
             'notes', 'organization', 'created_at', 'last_scanned_at',
+            'verified', 'covered_by', 'verification_method', 'verified_at',
+            'verification_expires_at', 'verification_token', 'verification',
         ]
-        read_only_fields = ['id', 'created_at', 'last_scanned_at']
+        read_only_fields = [
+            'id', 'created_at', 'last_scanned_at', 'verified', 'covered_by',
+            'verification_method', 'verified_at', 'verification_expires_at',
+            'verification_token', 'verification',
+        ]
+
+    def validate_value(self, value):
+        # Saving a target never contacts it, so names need not resolve yet;
+        # IP literals and CIDR ranges that are internal are still refused.
+        try:
+            return _validate_target(value, resolve=False)
+        except _DRFValidationError as exc:
+            raise serializers.ValidationError(_unwrap(exc))
+
+    def _status(self, obj):
+        from .authorization import verification_status
+        cache = self.__dict__.setdefault('_status_cache', {})
+        if obj.pk not in cache:
+            cache[obj.pk] = verification_status(obj)
+        return cache[obj.pk]
+
+    def get_verified(self, obj):
+        return self._status(obj)['verified']
+
+    def get_covered_by(self, obj):
+        return self._status(obj)['covered_by']
+
+    def get_verification_expires_at(self, obj):
+        return self._status(obj)['expires_at']
+
+    def get_verification(self, obj):
+        from .netguard import host_of
+        from .verification import challenge_instructions
+        if obj.target_type == 'cidr' or ('/' in obj.value and '://' not in obj.value):
+            return None
+        host = host_of(obj.value)
+        return challenge_instructions(host, obj.verification_token) if host else None
 
 
 class ProfileSerializer(serializers.ModelSerializer):
@@ -79,12 +132,76 @@ class ProfileSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 
+def _unwrap(exc):
+    """validators raise {'field': msg}; field-level validators want just msg."""
+    detail = exc.detail
+    if isinstance(detail, dict):
+        detail = next(iter(detail.values()))
+    return detail
+
+
+def validate_cron_expression(value: str) -> str:
+    """
+    Standard 5-field cron, restricted to at most one run per hour so a
+    schedule cannot be used to hammer a target or flood the queue.
+    """
+    from celery.schedules import crontab_parser
+
+    fields = (value or '').split()
+    if len(fields) != 5:
+        raise serializers.ValidationError(
+            'Cron must have 5 fields: minute hour day-of-month month day-of-week.'
+        )
+    minute, hour, dom, month, dow = fields
+
+    if not minute.isdigit() or not 0 <= int(minute) <= 59:
+        raise serializers.ValidationError(
+            'Minute must be a single number 0-59 (scans may run at most once per hour).'
+        )
+
+    # (name, field, number of values, lowest value) — celery's crontab_parser
+    # takes the count of values, not the maximum.
+    for name, field, count, lowest in (('hour', hour, 24, 0), ('day-of-month', dom, 31, 1),
+                                       ('month', month, 12, 1), ('day-of-week', dow, 7, 0)):
+        try:
+            crontab_parser(count, lowest).parse(field)
+        except Exception:
+            raise serializers.ValidationError(f'Invalid cron {name} field: {field!r}.')
+    return ' '.join(fields)
+
+
 class ScheduledScanSerializer(serializers.ModelSerializer):
     class Meta:
         model  = ScheduledScan
         fields = ['id', 'target', 'scan_type', 'cron', 'is_active', 'organization',
-                  'last_run_at', 'next_run_at', 'created_at']
-        read_only_fields = ['id', 'last_run_at', 'next_run_at', 'created_at']
+                  'last_run_at', 'next_run_at', 'created_at', 'blocked_reason']
+        read_only_fields = ['id', 'last_run_at', 'next_run_at', 'created_at', 'blocked_reason']
+
+    blocked_reason = serializers.SerializerMethodField()
+
+    def get_blocked_reason(self, obj):
+        """Why this schedule cannot run right now (None when it can)."""
+        from .authorization import authorize_target, TargetNotVerified
+        try:
+            authorize_target(obj.user, obj.organization, obj.target)
+        except TargetNotVerified as exc:
+            return str(exc.detail)
+        return None
+
+    def validate_target(self, value):
+        try:
+            return _validate_target(value)
+        except _DRFValidationError as exc:
+            raise serializers.ValidationError(_unwrap(exc))
+
+    def validate_scan_type(self, value):
+        try:
+            return _validate_scan_type(value)
+        except _DRFValidationError as exc:
+            raise serializers.ValidationError(_unwrap(exc))
+
+    def validate_cron(self, value):
+        return validate_cron_expression(value)
 
 
 class ChangePasswordSerializer(serializers.Serializer):

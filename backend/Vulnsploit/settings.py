@@ -203,12 +203,17 @@ EMAIL_USE_TLS = config('EMAIL_USE_TLS', default=True, cast=bool)
 
 # ─── CONTENT SECURITY POLICY ────────────────────────────────────────────────────
 
-CSP_DEFAULT_SRC = ("'self'",)
-CSP_SCRIPT_SRC = ("'self'",)
-CSP_STYLE_SRC = ("'self'", "'unsafe-inline'")
-CSP_IMG_SRC = ("'self'", "data:")
-CSP_FONT_SRC = ("'self'",)
-CSP_CONNECT_SRC = ("'self'",)
+# django-csp >= 4.0 format (the old CSP_* settings now fail system checks).
+CONTENT_SECURITY_POLICY = {
+    'DIRECTIVES': {
+        'default-src': ("'self'",),
+        'script-src':  ("'self'",),
+        'style-src':   ("'self'", "'unsafe-inline'"),
+        'img-src':     ("'self'", "data:"),
+        'font-src':    ("'self'",),
+        'connect-src': ("'self'",),
+    },
+}
 
 
 # ─── SIMPLE JWT ─────────────────────────────────────────────────────────────────
@@ -268,6 +273,17 @@ REST_FRAMEWORK = {
 
 SCAN_RATE_LIMIT  = config('SCAN_RATE_LIMIT',  default='20/h')
 LOGIN_RATE_LIMIT = config('LOGIN_RATE_LIMIT', default='10/15m')
+
+# Lab/dev only: allow scan targets and webhooks on private, loopback and
+# link-local addresses. Leave False in any shared or production deployment —
+# otherwise users can scan this server's own network.
+ALLOW_PRIVATE_TARGETS = config('ALLOW_PRIVATE_TARGETS', default=False, cast=bool)
+
+# Scans, recon and schedules are only allowed against targets whose ownership
+# the user has proven (DNS TXT record or well-known file). Disable only in an
+# isolated lab; with it off, any user can scan any public host.
+REQUIRE_TARGET_VERIFICATION = config('REQUIRE_TARGET_VERIFICATION', default=True, cast=bool)
+TARGET_VERIFICATION_TTL_DAYS = config('TARGET_VERIFICATION_TTL_DAYS', default=90, cast=int)
 
 # Gemini API key for AI-powered report interpretation (free tier)
 GEMINI_API_KEY = config('GEMINI_API_KEY', default=None)

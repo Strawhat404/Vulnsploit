@@ -12,6 +12,10 @@ def hash_api_key(key):
     return hashlib.sha256(key.encode()).hexdigest()
 
 
+def generate_verification_token():
+    return secrets.token_hex(16)
+
+
 # ─── Multi-tenancy: Organizations ──────────────────────────────────────────────
 
 class Organization(models.Model):
@@ -164,9 +168,36 @@ class Target(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     last_scanned_at = models.DateTimeField(null=True, blank=True)
 
+    # ── Proof of ownership (required before anything may be scanned) ──────────
+    class VerificationMethod(models.TextChoices):
+        NONE = '',     'Not verified'
+        DNS  = 'dns',  'DNS TXT record'
+        HTTP = 'http', 'Well-known file'
+
+    verification_token = models.CharField(
+        max_length=64, default=generate_verification_token, editable=False,
+    )
+    verification_method = models.CharField(
+        max_length=10, choices=VerificationMethod.choices, blank=True, default='',
+    )
+    verified_at = models.DateTimeField(null=True, blank=True)
+    # When the user attested they are authorized to test this target.
+    authorization_confirmed_at = models.DateTimeField(null=True, blank=True)
+    # Smallest "days left" threshold we've already emailed about (14, 3, 0);
+    # None until the first warning. Reset whenever the target is re-verified.
+    expiry_notice_sent = models.PositiveSmallIntegerField(null=True, blank=True)
+
     class Meta:
         ordering = ['-created_at']
         unique_together = ['user', 'value']
+
+    def reset_verification(self):
+        """Called when the value changes: old proof must not carry over."""
+        self.verification_token = generate_verification_token()
+        self.verification_method = ''
+        self.verified_at = None
+        self.authorization_confirmed_at = None
+        self.expiry_notice_sent = None
 
     def __str__(self):
         return f"{self.name} ({self.value})"
@@ -355,7 +386,9 @@ class FindingStatus(models.Model):
     suppressions persist even when findings_json is regenerated.
 
     Suppressions are scoped to a target (not a specific report) so
-    that scheduled scans inherit suppressions from previous runs.
+    that scheduled scans inherit suppressions from previous runs, and to
+    an owner (organization, or the user when private) so they never
+    leak between tenants.
     """
 
     class Decision(models.TextChoices):
@@ -375,7 +408,20 @@ class FindingStatus(models.Model):
 
     class Meta:
         ordering = ['-updated_at']
-        unique_together = ['target', 'fingerprint']
+        # One decision per finding per owner scope: shared per organization,
+        # or private per user when no organization is set.
+        constraints = [
+            models.UniqueConstraint(
+                fields=['organization', 'target', 'fingerprint'],
+                condition=models.Q(organization__isnull=False),
+                name='uniq_findingstatus_org_target_fp',
+            ),
+            models.UniqueConstraint(
+                fields=['user', 'target', 'fingerprint'],
+                condition=models.Q(organization__isnull=True),
+                name='uniq_findingstatus_user_target_fp',
+            ),
+        ]
         indexes = [
             models.Index(fields=['target', 'fingerprint']),
             models.Index(fields=['decision']),

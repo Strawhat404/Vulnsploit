@@ -34,27 +34,40 @@ TOOL_META = {
 }
 
 
-def render_pdf(report_id: int, target: str, interpreted: dict,
-               user=None, scan_results=None) -> str:
+def _safe_url_fetcher(url: str):
     """
-    Render the HTML report template and convert to PDF using WeasyPrint.
+    WeasyPrint url_fetcher that only resolves inline ``data:`` URLs.
 
-    Returns the relative path to the saved PDF file (relative to MEDIA_ROOT).
+    Reports embed text that came from scanned targets. Without this, any
+    markup that slipped into the HTML could make the server fetch internal
+    URLs (cloud metadata, Redis/HTTP admin ports) or read local ``file://``
+    paths while the PDF is rendered.
     """
-    from weasyprint import HTML, CSS
+    from weasyprint import default_url_fetcher
 
-    # ── Prepare output directory ──────────────────────────────────────────────
-    media_root   = Path(settings.MEDIA_ROOT)
-    reports_dir  = media_root / 'reports'
-    reports_dir.mkdir(parents=True, exist_ok=True)
+    if url.lower().startswith('data:'):
+        return default_url_fetcher(url)
+    raise ValueError(f"External resource blocked in report rendering: {url[:80]}")
 
-    filename     = f"vulnsploit_report_{report_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-    pdf_path     = reports_dir / filename
-    relative_path = f"reports/{filename}"
 
+def _write_pdf(html_content: str, pdf_path) -> None:
+    from weasyprint import HTML
+
+    HTML(string=html_content, url_fetcher=_safe_url_fetcher).write_pdf(
+        str(pdf_path),
+        stylesheets=[],
+        presentational_hints=True,
+    )
+
+
+def render_report_html(report_id: int, target: str, interpreted: dict,
+                       user=None, scan_results=None) -> str:
+    """Render the report template to an HTML string (autoescaped)."""
     # ── Load Jinja2 template ──────────────────────────────────────────────────
+    # autoescape: findings, evidence and raw tool output come from scanned
+    # targets and must never be interpreted as markup.
     template_dir = Path(__file__).parent / 'templates' / 'reports'
-    env          = Environment(loader=FileSystemLoader(str(template_dir)))
+    env          = Environment(loader=FileSystemLoader(str(template_dir)), autoescape=True)
     template     = env.get_template('report.html')
 
     # ── Build tools used list ─────────────────────────────────────────────────
@@ -90,7 +103,7 @@ def render_pdf(report_id: int, target: str, interpreted: dict,
                 })
 
     # ── Render HTML ───────────────────────────────────────────────────────────
-    html_content = template.render(
+    return template.render(
         target            = target,
         date              = datetime.now().strftime('%B %d, %Y'),
         assessor          = getattr(user, 'username', 'VulnSploit') if user else 'VulnSploit',
@@ -109,14 +122,29 @@ def render_pdf(report_id: int, target: str, interpreted: dict,
         compliance_summary= interpreted.get('compliance_summary', {}),
     )
 
+
+def render_pdf(report_id: int, target: str, interpreted: dict,
+               user=None, scan_results=None) -> str:
+    """
+    Render the HTML report template and convert to PDF using WeasyPrint.
+
+    Returns the relative path to the saved PDF file (relative to MEDIA_ROOT).
+    """
+    # ── Prepare output directory ──────────────────────────────────────────────
+    media_root   = Path(settings.MEDIA_ROOT)
+    reports_dir  = media_root / 'reports'
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    filename     = f"vulnsploit_report_{report_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+    pdf_path     = reports_dir / filename
+    relative_path = f"reports/{filename}"
+
+    html_content = render_report_html(report_id, target, interpreted, user, scan_results)
+
     # ── Convert to PDF ────────────────────────────────────────────────────────
     logger.info("Rendering PDF | report=%s target=%s", report_id, target)
 
-    HTML(string=html_content).write_pdf(
-        str(pdf_path),
-        stylesheets=[],
-        presentational_hints=True,
-    )
+    _write_pdf(html_content, pdf_path)
 
     logger.info("PDF saved | path=%s size=%d bytes", pdf_path, pdf_path.stat().st_size)
     return relative_path
