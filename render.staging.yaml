@@ -1,0 +1,144 @@
+# render.staging.yaml — STAGING environment, deployed from the `develop` branch.
+#
+# A fully separate copy of production: its own database, Redis, secret key and
+# URLs. It must never share any of those with production.
+#
+# Create it in Render: New + > Blueprint > pick this repo > branch `develop` >
+# Blueprint file path `render.staging.yaml`. Render then asks for the values
+# marked `sync: false` (once only):
+#   CORS_ALLOWED_ORIGINS  the staging FRONTEND origin, e.g. https://vulnsploit-staging.vercel.app
+#   SITE_URL              the same staging frontend URL (used in email links)
+#   GEMINI_API_KEY        leave EMPTY so staging uses the rule-based fallback and
+#                         never sends test data to Gemini
+# See docs/ENVIRONMENTS.md for the full picture.
+
+services:
+
+  # ─── API + Celery worker (one container via supervisord, as in production) ──
+  - type: web
+    name: vulnsploit-staging-api
+    runtime: docker
+    branch: develop
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: starter
+    healthCheckPath: /api/health/
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DEBUG
+        value: "False"
+      - key: ALLOWED_HOSTS
+        value: ".onrender.com,localhost"
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: SITE_URL
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      # Staging must never email real people. Messages go to the service log.
+      - key: EMAIL_BACKEND
+        value: django.core.mail.backends.console.EmailBackend
+      - key: SECURE_SSL_REDIRECT
+        value: "False"
+      # Keep the safety checks on in staging so they get exercised.
+      - key: REQUIRE_TARGET_VERIFICATION
+        value: "True"
+      - key: ALLOW_PRIVATE_TARGETS
+        value: "False"
+      - key: DB_ENGINE
+        value: django.db.backends.postgresql
+      - key: DB_NAME
+        fromDatabase:
+          name: vulnsploit-staging-db
+          property: database
+      - key: DB_USER
+        fromDatabase:
+          name: vulnsploit-staging-db
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: vulnsploit-staging-db
+          property: password
+      - key: DB_HOST
+        fromDatabase:
+          name: vulnsploit-staging-db
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: vulnsploit-staging-db
+          property: port
+      - key: CELERY_BROKER_URL
+        fromService:
+          name: vulnsploit-staging-redis
+          type: redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          name: vulnsploit-staging-redis
+          type: redis
+          property: connectionString
+
+  # ─── Celery Beat: fires scheduled scans and the daily verification-expiry ───
+  # warning. Exactly ONE beat process may run per environment, which is why it
+  # is its own service rather than part of the web container.
+  - type: worker
+    name: vulnsploit-staging-beat
+    runtime: docker
+    branch: develop
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: starter
+    dockerCommand: celery -A Vulnsploit beat --loglevel=info
+    envVars:
+      - key: SECRET_KEY
+        fromService:
+          name: vulnsploit-staging-api
+          type: web
+          envVarKey: SECRET_KEY
+      - key: DEBUG
+        value: "False"
+      - key: DB_ENGINE
+        value: django.db.backends.postgresql
+      - key: DB_NAME
+        fromDatabase:
+          name: vulnsploit-staging-db
+          property: database
+      - key: DB_USER
+        fromDatabase:
+          name: vulnsploit-staging-db
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: vulnsploit-staging-db
+          property: password
+      - key: DB_HOST
+        fromDatabase:
+          name: vulnsploit-staging-db
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: vulnsploit-staging-db
+          property: port
+      - key: CELERY_BROKER_URL
+        fromService:
+          name: vulnsploit-staging-redis
+          type: redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          name: vulnsploit-staging-redis
+          type: redis
+          property: connectionString
+
+  # ─── Redis ───────────────────────────────────────────────────────────────────
+  - type: redis
+    name: vulnsploit-staging-redis
+    plan: starter
+    maxmemoryPolicy: noeviction
+    ipAllowList: []        # empty list = block all external connections (internal network only)
+
+# ─── PostgreSQL ────────────────────────────────────────────────────────────────
+databases:
+  - name: vulnsploit-staging-db
+    plan: starter
