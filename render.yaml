@@ -8,6 +8,7 @@ services:
   - type: web
     name: vulnsploit-api
     runtime: docker
+    branch: main          # production deploys from main only
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
     plan: starter
@@ -63,6 +64,7 @@ services:
   - type: worker
     name: vulnsploit-celery
     runtime: docker
+    branch: main          # production deploys from main only
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
     plan: starter
