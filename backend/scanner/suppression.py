@@ -6,6 +6,7 @@ target + finding fingerprint, not by report ID.
 """
 
 import logging
+from django.db.models import Q
 from .models import FindingStatus
 
 logger = logging.getLogger('scanner')
@@ -22,7 +23,22 @@ def _finding_fingerprint(finding: dict) -> str:
     return f"{title}|{tool}|{cve_id}"
 
 
-def apply_suppressions(findings: list, target: str) -> dict:
+def _scoped_statuses(target: str, user=None, organization=None):
+    """
+    FindingStatus rows visible to this report's owner: the organization's
+    shared decisions for an org report, otherwise the user's own private
+    ones. Never another tenant's.
+    """
+    if organization is not None:
+        scope = Q(organization=organization)
+    elif user is not None:
+        scope = Q(organization__isnull=True, user=user)
+    else:
+        return FindingStatus.objects.none()
+    return FindingStatus.objects.filter(scope, target=target)
+
+
+def apply_suppressions(findings: list, target: str, user=None, organization=None) -> dict:
     """
     Apply suppressions to a list of findings for a given target.
     Mutates the findings list in place by adding a 'suppression' field
@@ -48,7 +64,7 @@ def apply_suppressions(findings: list, target: str) -> dict:
 
     # Load all suppressions for this target in one query
     suppressions = {}
-    for fs in FindingStatus.objects.filter(target=target).exclude(decision='open'):
+    for fs in _scoped_statuses(target, user, organization).exclude(decision='open'):
         suppressions[fs.fingerprint] = fs.decision
 
     if not suppressions:
@@ -92,14 +108,14 @@ def apply_suppressions(findings: list, target: str) -> dict:
     }
 
 
-def get_suppression_fingerprints(target: str) -> set:
+def get_suppression_fingerprints(target: str, user=None, organization=None) -> set:
     """
     Return the set of fingerprints that should be suppressed
-    (excluded from severity counts) for a given target.
+    (excluded from severity counts) for a given target and owner scope.
     Useful for filtering findings before posture score calculation.
     """
     return set(
-        FindingStatus.objects.filter(target=target)
+        _scoped_statuses(target, user, organization)
         .exclude(decision='open')
         .values_list('fingerprint', flat=True)
     )

@@ -1,7 +1,9 @@
 import logging
 import os
 from rest_framework import generics, status, viewsets
+from rest_framework.decorators import action
 from rest_framework import serializers as drf_serializers
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -10,7 +12,7 @@ from django.shortcuts import get_object_or_404, redirect
 from django.http import FileResponse, Http404
 from django.conf import settings
 from django.contrib.auth import update_session_auth_hash
-from django.db import models as dj_models
+from django.db import IntegrityError, models as dj_models, transaction
 from django_ratelimit.decorators import ratelimit
 from django.utils.decorators import method_decorator
 
@@ -26,7 +28,10 @@ from .serializers import (
     AuditLogSerializer, WebhookEndpointSerializer, FindingStatusSerializer,
 )
 from .tasks import execute_scan, execute_full_recon, generate_report
-from .validators import validate_target, validate_scan_type
+from .validators import validate_target, validate_scan_type, guess_target_type
+from .authorization import authorize_target
+from .permissions import OrgRoleMixin, ROLE_RANK, require_role, role_in_org
+from .verification import verify_target, mark_verified
 
 logger = logging.getLogger('scanner')
 
@@ -54,29 +59,34 @@ def org_scoped_queryset(model, user):
     )
 
 
-def resolve_org(request):
+def resolve_org(request, min_role=None):
     """
     Resolve an optional organization from request.data. Returns an
     Organization instance if a valid org id is provided AND the user is a
     member, else None (private to user).
-    Raises a ValidationError if an org is provided but the user is not a member.
+    Raises a ValidationError if an org is provided but the user is not a member,
+    and a 403 if ``min_role`` is given and the user's role in it is lower.
     """
     org_id = request.data.get('organization')
     if not org_id:
         return None
     user_orgs = get_user_orgs(request.user)
     try:
-        return user_orgs.get(id=org_id)
-    except Organization.DoesNotExist:
+        org = user_orgs.get(id=org_id)
+    except (Organization.DoesNotExist, ValueError, TypeError):
         raise drf_serializers.ValidationError(
             {'organization': 'Not a member of that organization.'}
         )
+    if min_role:
+        require_role(request.user, org, min_role)
+    return org
 
 
 # ─── JWT with httpOnly cookie ───────────────────────────────────────────────────
 
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework_simplejwt.settings import api_settings
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from django.conf import settings as django_settings
 
 
@@ -112,11 +122,21 @@ class CookieTokenRefreshView(TokenRefreshView):
         return super().finalize_response(request, response, *args, **kwargs)
 
     def post(self, request, *args, **kwargs):
-        if 'refresh' not in request.data and 'refresh_token' in request.COOKIES:
-            request.data._mutable = True
-            request.data['refresh'] = request.COOKIES['refresh_token']
-            request.data._mutable = False
-        return super().post(request, *args, **kwargs)
+        # The refresh token normally arrives in the httpOnly cookie; the SPA
+        # POSTs an empty JSON body. Build the serializer input ourselves
+        # rather than mutating request.data, which is a plain dict for JSON
+        # requests and an immutable QueryDict for form posts.
+        data = {}
+        refresh = request.data.get('refresh') or request.COOKIES.get('refresh_token')
+        if refresh:
+            data['refresh'] = refresh
+
+        serializer = self.get_serializer(data=data)
+        try:
+            serializer.is_valid(raise_exception=True)
+        except TokenError as exc:
+            raise InvalidToken(exc.args[0])
+        return Response(serializer.validated_data, status=status.HTTP_200_OK)
 
 
 # ─── User Stats ─────────────────────────────────────────────────────────────────
@@ -154,7 +174,8 @@ class UserStatsView(APIView):
 
 # ─── Targets ───────────────────────────────────────────────────────────────────
 
-class TargetViewSet(viewsets.ModelViewSet):
+class TargetViewSet(OrgRoleMixin, viewsets.ModelViewSet):
+    write_role         = 'admin'
     serializer_class   = TargetSerializer
     permission_classes = [IsAuthenticated]
 
@@ -162,7 +183,173 @@ class TargetViewSet(viewsets.ModelViewSet):
         return org_scoped_queryset(Target, self.request.user)
 
     def perform_create(self, serializer):
-        serializer.save(user=self.request.user, organization=resolve_org(self.request))
+        serializer.save(
+            user=self.request.user,
+            organization=resolve_org(self.request, min_role=self.write_role),
+        )
+
+    def perform_update(self, serializer):
+        instance  = serializer.instance
+        old_value = instance.value
+        target = serializer.save(user=instance.user, organization=instance.organization)
+        if target.value != old_value:
+            # Proof for the old value says nothing about the new one.
+            target.reset_verification()
+            target.save(update_fields=[
+                'verification_token', 'verification_method',
+                'verified_at', 'authorization_confirmed_at', 'expiry_notice_sent',
+            ])
+
+    BULK_ADD_MAX = 100
+    BULK_VERIFY_MAX = 20
+
+    @action(detail=False, methods=['post'], url_path='bulk')
+    def bulk(self, request):
+        """
+        POST /api/targets/bulk/
+        Body: {"values": ["example.com", "10.0.0.1", ...], "organization": <optional id>}
+
+        Adds many targets at once. Each line is handled on its own: a bad line
+        is reported and skipped, never failing the rest. Nothing is contacted.
+        """
+        values = request.data.get('values')
+        if not isinstance(values, list):
+            return Response({'detail': "'values' must be a list of targets."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if len(values) > self.BULK_ADD_MAX:
+            return Response({'detail': f'At most {self.BULK_ADD_MAX} targets per request.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        org = resolve_org(request, min_role=self.write_role)
+        owned = set(org_scoped_queryset(Target, request.user)
+                    .filter(organization=org).values_list('value', flat=True)) \
+            if org else set(Target.objects.filter(user=request.user, organization__isnull=True)
+                            .values_list('value', flat=True))
+        owned_lower = {v.lower() for v in owned}
+
+        results, seen = [], set()
+        counts = {'created': 0, 'existing': 0, 'invalid': 0}
+        for raw in values:
+            if not isinstance(raw, str):
+                results.append({'value': str(raw)[:80], 'status': 'invalid', 'detail': 'Must be text.'})
+                counts['invalid'] += 1
+                continue
+            value = raw.strip()
+            if not value:
+                continue
+            key = value.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+
+            try:
+                clean = validate_target(value, resolve=False)
+            except drf_serializers.ValidationError as exc:
+                detail = exc.detail
+                detail = next(iter(detail.values())) if isinstance(detail, dict) else detail
+                detail = detail[0] if isinstance(detail, list) else detail
+                results.append({'value': value, 'status': 'invalid', 'detail': str(detail)})
+                counts['invalid'] += 1
+                continue
+
+            if clean.lower() in owned_lower:
+                existing = Target.objects.filter(user=request.user, organization=org, value__iexact=clean).first()
+                results.append({'value': clean, 'status': 'exists', 'id': existing.id if existing else None})
+                counts['existing'] += 1
+                continue
+
+            target = Target.objects.create(
+                user=request.user, organization=org, name=clean[:100], value=clean,
+                target_type=guess_target_type(clean),
+            )
+            results.append({'value': clean, 'status': 'created', 'id': target.id})
+            counts['created'] += 1
+
+        logger.info("Bulk targets | user=%s created=%d existing=%d invalid=%d",
+                    request.user.username, counts['created'], counts['existing'], counts['invalid'])
+        return Response({**counts, 'results': results})
+
+    @action(detail=False, methods=['post'], url_path='verify-bulk')
+    @method_decorator(ratelimit(key='user', rate='10/h', method='POST', block=True))
+    def verify_bulk(self, request):
+        """
+        POST /api/targets/verify-bulk/
+        Body: {"ids": [1, 2, ...], "method": "dns" | "http", "confirm_authorization": true}
+
+        Runs the chosen check for each target and reports every outcome.
+        """
+        if request.data.get('confirm_authorization') is not True:
+            return Response(
+                {'detail': 'You must confirm you are authorized to test these targets.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        method = request.data.get('method')
+        if method not in ('dns', 'http'):
+            return Response({'detail': "method must be 'dns' or 'http'."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        ids = request.data.get('ids')
+        if (not isinstance(ids, list) or not ids
+                or not all(isinstance(i, int) and not isinstance(i, bool) for i in ids)):
+            return Response({'detail': "'ids' must be a non-empty list of integers."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if len(ids) > self.BULK_VERIFY_MAX:
+            return Response({'detail': f'At most {self.BULK_VERIFY_MAX} targets per request.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        targets = {t.id: t for t in self.get_queryset().filter(id__in=ids)}
+        results, ok_count = [], 0
+        for tid in dict.fromkeys(ids):
+            target = targets.get(tid)
+            if target is None:
+                results.append({'id': tid, 'value': None, 'verified': False, 'detail': 'Target not found.'})
+                continue
+            try:
+                require_role(request.user, target.organization_id, self.write_role)
+            except PermissionDenied as exc:
+                results.append({'id': tid, 'value': target.value, 'verified': False,
+                                'detail': str(exc.detail)})
+                continue
+            ok, message = verify_target(target, method)
+            if ok:
+                mark_verified(target, method)
+                ok_count += 1
+            results.append({'id': tid, 'value': target.value, 'verified': ok, 'detail': message})
+
+        logger.info("Bulk verify | user=%s method=%s ok=%d total=%d",
+                    request.user.username, method, ok_count, len(results))
+        return Response({'verified': ok_count, 'failed': len(results) - ok_count, 'results': results})
+
+    @action(detail=True, methods=['post'], url_path='verify')
+    @method_decorator(ratelimit(key='user', rate='30/h', method='POST', block=True))
+    def verify(self, request, pk=None):
+        """
+        POST /api/targets/<id>/verify/
+        Body: {"method": "dns" | "http", "confirm_authorization": true}
+        """
+        target = self.get_object()
+
+        if request.data.get('confirm_authorization') is not True:
+            return Response(
+                {'detail': 'You must confirm you are authorized to test this target.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        method = request.data.get('method')
+        if method not in ('dns', 'http'):
+            return Response(
+                {'detail': "method must be 'dns' or 'http'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ok, message = verify_target(target, method)
+        if not ok:
+            return Response({'detail': message}, status=status.HTTP_400_BAD_REQUEST)
+
+        mark_verified(target, method)
+        logger.info("Target verified | target=%s method=%s user=%s",
+                    target.id, method, request.user.username)
+        return Response(self.get_serializer(target).data)
 
 
 # ─── Profile / Settings ────────────────────────────────────────────────────────
@@ -250,6 +437,7 @@ class CancelScanView(APIView):
 
     def post(self, request, pk):
         scan = get_object_or_404(org_scoped_queryset(ScanResult, request.user), id=pk)
+        require_role(request.user, scan.organization_id, 'analyst')
         if scan.status in ('pending', 'running') and scan.celery_task_id:
             from celery.app.control import Control
             from celery import current_app
@@ -265,6 +453,7 @@ class CancelReconView(APIView):
 
     def post(self, request, pk):
         session = get_object_or_404(org_scoped_queryset(ReconSession, request.user), id=pk)
+        require_role(request.user, session.organization_id, 'analyst')
         if session.status in ('pending', 'running') and session.celery_task_id:
             from celery.app.control import Control
             from celery import current_app
@@ -280,7 +469,8 @@ class CancelReconView(APIView):
 
 # ─── Scheduled Scans ───────────────────────────────────────────────────────────
 
-class ScheduledScanListCreateView(generics.ListCreateAPIView):
+class ScheduledScanListCreateView(OrgRoleMixin, generics.ListCreateAPIView):
+    write_role         = 'admin'
     serializer_class   = ScheduledScanSerializer
     permission_classes = [IsAuthenticated]
 
@@ -288,12 +478,14 @@ class ScheduledScanListCreateView(generics.ListCreateAPIView):
         return org_scoped_queryset(ScheduledScan, self.request.user)
 
     def perform_create(self, serializer):
-        org = resolve_org(self.request)
+        org = resolve_org(self.request, min_role=self.write_role)
+        authorize_target(self.request.user, org, serializer.validated_data['target'])
         instance = serializer.save(user=self.request.user, organization=org)
         _create_beat_schedule(serializer, org, self.request.user)
 
 
-class ScheduledScanDetailView(generics.RetrieveUpdateDestroyAPIView):
+class ScheduledScanDetailView(OrgRoleMixin, generics.RetrieveUpdateDestroyAPIView):
+    write_role         = 'admin'
     serializer_class   = ScheduledScanSerializer
     permission_classes = [IsAuthenticated]
 
@@ -305,7 +497,10 @@ class ScheduledScanDetailView(generics.RetrieveUpdateDestroyAPIView):
         instance.delete()
 
     def perform_update(self, serializer):
-        instance = serializer.save()
+        current = serializer.instance
+        target = serializer.validated_data.get('target', current.target)
+        authorize_target(self.request.user, current.organization, target)
+        instance = serializer.save(user=current.user, organization=current.organization)
         _remove_beat_schedule(instance)
         _create_beat_schedule(serializer, instance.organization, instance.user)
 
@@ -396,7 +591,8 @@ class ScanResultListCreateView(generics.ListCreateAPIView):
 
         validate_target(target)
         validate_scan_type(scan_type)
-        org = resolve_org(self.request)
+        org = resolve_org(self.request, min_role='analyst')
+        authorize_target(self.request.user, org, target)
 
         scan = serializer.save(
             user         = self.request.user,
@@ -448,7 +644,8 @@ class FullReconView(APIView):
         except Exception as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        org = resolve_org(request)
+        org = resolve_org(request, min_role='analyst')
+        authorize_target(request.user, org, target)
 
         session = ReconSession.objects.create(
             user         = request.user,
@@ -543,6 +740,15 @@ class GenerateReportView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        if (
+            not isinstance(scan_ids, list)
+            or not all(isinstance(i, int) and not isinstance(i, bool) for i in scan_ids)
+        ):
+            return Response(
+                {'detail': 'scan_ids must be a list of integers.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         scans = org_scoped_queryset(ScanResult, request.user).filter(
             id__in=scan_ids,
             status='completed',
@@ -554,8 +760,10 @@ class GenerateReportView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # Only the scans this user is allowed to see go any further.
+        allowed_ids = list(scans.values_list('id', flat=True))
         target = scans.first().target
-        org    = resolve_org(request)
+        org    = resolve_org(request, min_role='analyst')
         report = ScanReport.objects.create(
             user         = request.user,
             organization = org,
@@ -564,10 +772,10 @@ class GenerateReportView(APIView):
         )
         report.scan_results.set(scans)
 
-        generate_report.delay(scan_ids=list(scan_ids), report_id=report.id)
+        generate_report.delay(scan_ids=allowed_ids, report_id=report.id)
 
         logger.info("Report generation queued | report=%s user=%s scans=%s",
-                    report.id, request.user.username, scan_ids)
+                    report.id, request.user.username, allowed_ids)
 
         return Response(
             ScanReportSerializer(report, context={'request': request}).data,
@@ -635,9 +843,29 @@ class OrganizationViewSet(viewsets.ModelViewSet):
         )
         logger.info("Organization created | org=%s owner=%s", org.id, self.request.user.username)
 
+    def perform_update(self, serializer):
+        require_role(self.request.user, serializer.instance, 'owner')
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        require_role(self.request.user, instance, 'owner')
+        instance.delete()
+
+
+def _owner_count(org_id):
+    return OrganizationMember.objects.filter(
+        organization_id=org_id, role=OrganizationMember.Role.OWNER,
+    ).count()
+
 
 class OrganizationMemberViewSet(viewsets.ModelViewSet):
-    """Manage members of organizations the current user belongs to."""
+    """
+    Manage members of organizations the current user belongs to.
+
+    Admins manage analysts and viewers; only owners create, change or remove
+    admins and owners. Nobody changes their own role, and an organization
+    always keeps at least one owner.
+    """
     serializer_class   = OrganizationMemberSerializer
     permission_classes = [IsAuthenticated]
 
@@ -646,30 +874,79 @@ class OrganizationMemberViewSet(viewsets.ModelViewSet):
             organization__in=get_user_orgs(self.request.user)
         )
 
+    @staticmethod
+    def _need_owner_for(role):
+        return role in (OrganizationMember.Role.OWNER, OrganizationMember.Role.ADMIN)
+
+    def _actor_role(self, org_id, minimum='admin'):
+        """Caller's role in the org; 403 if below ``minimum``."""
+        require_role(self.request.user, org_id, minimum)
+        return role_in_org(self.request.user, org_id)
+
     def perform_create(self, serializer):
         org = serializer.validated_data['organization']
-        if not get_user_orgs(self.request.user).filter(id=org.id).exists():
+        if role_in_org(self.request.user, org) is None:
             raise drf_serializers.ValidationError(
                 {'organization': 'You are not a member of that organization.'}
             )
+        actor = self._actor_role(org)
+        new_role = serializer.validated_data.get('role', OrganizationMember.Role.VIEWER)
+        if self._need_owner_for(new_role) and actor != 'owner':
+            raise PermissionDenied('Only an owner can add admins or owners.')
         serializer.save()
         logger.info("Member added | org=%s user=%s role=%s",
-                    org.id, serializer.validated_data.get('user').username,
-                    serializer.validated_data.get('role'))
+                    org.id, serializer.validated_data.get('user').username, new_role)
+
+    def perform_update(self, serializer):
+        member = serializer.instance
+        actor = self._actor_role(member.organization_id)
+        if member.user_id == self.request.user.id:
+            raise PermissionDenied('You cannot change your own role.')
+
+        new_role = serializer.validated_data.get('role', member.role)
+        if actor != 'owner' and (self._need_owner_for(member.role) or self._need_owner_for(new_role)):
+            raise PermissionDenied('Only an owner can change admins or owners, or grant those roles.')
+        if (member.role == OrganizationMember.Role.OWNER
+                and new_role != OrganizationMember.Role.OWNER
+                and _owner_count(member.organization_id) <= 1):
+            raise PermissionDenied('An organization must keep at least one owner.')
+
+        # Membership identity is fixed; only the role may change.
+        serializer.save(organization=member.organization, user=member.user)
+
+    def perform_destroy(self, member):
+        leaving = member.user_id == self.request.user.id
+        if not leaving:
+            actor = self._actor_role(member.organization_id)
+            if actor != 'owner' and self._need_owner_for(member.role):
+                raise PermissionDenied('Only an owner can remove admins or owners.')
+        elif role_in_org(self.request.user, member.organization_id) is None:
+            raise PermissionDenied('Not a member of this organization.')
+
+        if (member.role == OrganizationMember.Role.OWNER
+                and _owner_count(member.organization_id) <= 1):
+            raise PermissionDenied('An organization must keep at least one owner.')
+        member.delete()
 
 
 # ─── Audit Logs ───────────────────────────────────────────────────────────────
 
 class AuditLogListView(generics.ListAPIView):
-    """GET /api/audit-logs/ — list audit log entries visible to the user."""
+    """
+    GET /api/audit-logs/ — the user's own private entries, plus the full log
+    of every organization where they are an admin or owner.
+    """
     serializer_class   = AuditLogSerializer
     pagination_class   = ScanPagination
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        user_orgs = get_user_orgs(self.request.user)
+        managed_orgs = Organization.objects.filter(
+            memberships__user=self.request.user,
+            memberships__role__in=[OrganizationMember.Role.ADMIN, OrganizationMember.Role.OWNER],
+        )
         return AuditLog.objects.filter(
-            dj_models.Q(organization__in=user_orgs) |
+            dj_models.Q(organization__in=managed_orgs) |
             dj_models.Q(organization__isnull=True, user=self.request.user)
         )
 
@@ -779,7 +1056,8 @@ class ReportExportView(APIView):
 
 # ─── Webhook Endpoints ─────────────────────────────────────────────────────────
 
-class WebhookEndpointViewSet(viewsets.ModelViewSet):
+class WebhookEndpointViewSet(OrgRoleMixin, viewsets.ModelViewSet):
+    write_role         = 'admin'
     """CRUD for webhook endpoints (Slack/Teams/Discord/alerting)."""
     serializer_class   = WebhookEndpointSerializer
     permission_classes = [IsAuthenticated]
@@ -796,12 +1074,20 @@ class WebhookEndpointViewSet(viewsets.ModelViewSet):
         # Auto-generate HMAC secret if not provided
         if not serializer.validated_data.get('secret'):
             serializer.validated_data['secret'] = _secrets.token_hex(32)
-        serializer.save(user=self.request.user, organization=resolve_org(self.request))
+        serializer.save(
+            user=self.request.user,
+            organization=resolve_org(self.request, min_role=self.write_role),
+        )
+
+    def perform_update(self, serializer):
+        instance = serializer.instance
+        serializer.save(user=instance.user, organization=instance.organization)
 
 
 # ─── Finding Status / False Positive Suppression ──────────────────────────────
 
-class FindingStatusViewSet(viewsets.ModelViewSet):
+class FindingStatusViewSet(OrgRoleMixin, viewsets.ModelViewSet):
+    write_role         = 'analyst'
     """
     CRUD for finding triage decisions (false positive, accepted risk,
     remediated). Suppressions are scoped to a target and persist across
@@ -825,5 +1111,23 @@ class FindingStatusViewSet(viewsets.ModelViewSet):
             qs = qs.filter(target=target)
         return qs
 
+    def _save_unique(self, serializer, **owner):
+        try:
+            with transaction.atomic():
+                serializer.save(**owner)
+        except IntegrityError:
+            raise drf_serializers.ValidationError(
+                {'fingerprint': 'A decision already exists for this finding on this target.'}
+            )
+
     def perform_create(self, serializer):
-        serializer.save(user=self.request.user, organization=resolve_org(self.request))
+        self._save_unique(
+            serializer, user=self.request.user,
+            organization=resolve_org(self.request, min_role=self.write_role),
+        )
+
+    def perform_update(self, serializer):
+        # Ownership is fixed at creation; a PATCH must not move a decision
+        # into another organization.
+        instance = serializer.instance
+        self._save_unique(serializer, user=instance.user, organization=instance.organization)

@@ -4,9 +4,11 @@ import os
 import ssl
 import socket
 from datetime import datetime, timezone as dt_tz
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 from decouple import config
 import requests as http_requests
+
+from .netguard import UnsafeTarget, assert_public_host, assert_public_target, assert_public_url
 
 # Per-tool subprocess timeouts in seconds
 TOOL_TIMEOUTS = {
@@ -192,6 +194,43 @@ def _parse_ssl_date(date_str: str):
         return None
 
 
+MAX_REDIRECTS = 5
+_REDIRECT_CODES = (301, 302, 303, 307, 308)
+
+
+def _fetch_validated(url: str, verify: bool, close: bool = True):
+    """
+    GET ``url`` following redirects ourselves so every hop is checked against
+    the SSRF guard. A public site must not be able to bounce us to an
+    internal address.
+    """
+    for _ in range(MAX_REDIRECTS + 1):
+        assert_public_url(url)
+        resp = http_requests.get(
+            url,
+            timeout=10,
+            allow_redirects=False,
+            verify=verify,
+            stream=True,  # headers only; never buffer a hostile body
+            headers={'User-Agent': 'VulnSploit-HeadersCheck/1.0'},
+        )
+        location = resp.headers.get('Location')
+        if resp.status_code in _REDIRECT_CODES and location:
+            url = urljoin(resp.url or url, location)
+            try:
+                resp.close()
+            except Exception:
+                pass
+            continue
+        if close:
+            try:
+                resp.close()
+            except Exception:
+                pass
+        return resp
+    raise RuntimeError(f'Too many redirects (more than {MAX_REDIRECTS})')
+
+
 def _run_headers_check(target: str):
     """
     Run HTTP security headers check using the requests library.
@@ -217,13 +256,7 @@ def _run_headers_check(target: str):
     cert_info = None
 
     try:
-        resp = http_requests.get(
-            url,
-            timeout=10,
-            allow_redirects=True,
-            verify=False,   # some targets have self-signed certs
-            headers={'User-Agent': 'VulnSploit-HeadersCheck/1.0'},
-        )
+        resp = _fetch_validated(url, verify=False)  # some targets have self-signed certs
         headers_found = dict(resp.headers)
         final_url     = resp.url
         status_code   = resp.status_code
@@ -232,8 +265,7 @@ def _run_headers_check(target: str):
         # Try HTTP if HTTPS fails
         try:
             http_url = url.replace('https://', 'http://')
-            resp         = http_requests.get(http_url, timeout=10, allow_redirects=True,
-                                              headers={'User-Agent': 'VulnSploit-HeadersCheck/1.0'})
+            resp         = _fetch_validated(http_url, verify=True)
             headers_found = dict(resp.headers)
             final_url     = resp.url
             status_code   = resp.status_code
@@ -255,7 +287,14 @@ def _run_headers_check(target: str):
     # cert info even if the HTTP request failed due to SSL errors.
     parsed = urlparse(final_url or url)
     hostname = parsed.hostname
-    if hostname and (final_url or url).startswith('https://'):
+    cert_host_ok = False
+    if hostname:
+        try:
+            assert_public_host(hostname)
+            cert_host_ok = True
+        except UnsafeTarget:
+            pass
+    if cert_host_ok and (final_url or url).startswith('https://'):
         cert_info = _check_ssl_cert(hostname, 443)
         if cert_info:
             if cert_info.get('expired'):
@@ -361,6 +400,16 @@ def _run_headers_check(target: str):
     return result_text, result_json
 
 def run_scan(target, scan_type):
+    # Re-check at execution time: the target may have resolved differently
+    # since it was validated at request time (DNS rebinding), or the job may
+    # have been queued by an older code path. subfinder only queries passive
+    # DNS sources and never contacts the target, so it is exempt.
+    if scan_type != 'subfinder':
+        try:
+            assert_public_target(target)
+        except UnsafeTarget as exc:
+            raise RuntimeError(str(exc))
+
     try:
         if scan_type == "nikto":
             command = ["nikto", "-h", target]

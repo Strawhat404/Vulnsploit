@@ -8,6 +8,7 @@ from django.utils import timezone
 from django.core.files import File
 from django.conf import settings
 from .utils import run_scan
+from .authorization import authorize_target, TargetNotVerified
 from .models import ScanResult, ReconSession
 
 logger = logging.getLogger('scanner')
@@ -23,6 +24,18 @@ def execute_scan(self, scan_id, target, scan_type):
     except ScanResult.DoesNotExist:
         logger.error("execute_scan: scan %s not found", scan_id)
         return f"Scan {scan_id} not found"
+
+    # Proof of ownership can expire or be revoked while a job waits in the
+    # queue, so it is checked again here, not just when the scan was requested.
+    try:
+        authorize_target(scan.user, scan.organization, scan.target)
+    except TargetNotVerified as exc:
+        logger.warning("Scan %s refused at execution: %s", scan_id, exc.detail)
+        scan.status       = ScanResult.Status.FAILED
+        scan.result       = f"Error: {exc.detail}"
+        scan.completed_at = timezone.now()
+        scan.save(update_fields=['status', 'result', 'completed_at'])
+        return f"Scan {scan_id} refused: target not verified"
 
     scan.status = ScanResult.Status.RUNNING
     scan.result = "Scan in progress..."
@@ -90,6 +103,15 @@ def execute_full_recon(self, session_id):
         logger.error("execute_full_recon: session %s not found", session_id)
         return
 
+    try:
+        authorize_target(session.user, session.organization, session.target)
+    except TargetNotVerified as exc:
+        logger.warning("Full recon %s refused at execution: %s", session_id, exc.detail)
+        session.status       = ReconSession.Status.FAILED
+        session.completed_at = timezone.now()
+        session.save(update_fields=['status', 'completed_at'])
+        return f"Full recon session {session_id} refused: target not verified"
+
     session.status = ReconSession.Status.RUNNING
     session.save(update_fields=['status'])
 
@@ -101,7 +123,7 @@ def execute_full_recon(self, session_id):
     def run_tool(tool):
         scan = ScanResult.objects.create(
             user          = session.user,
-            organization = session.organization_id,
+            organization_id = session.organization_id,
             target        = session.target,
             scan_type     = tool,
             status        = ScanResult.Status.RUNNING,
@@ -171,23 +193,43 @@ def run_scheduled_scan(self, scheduled_scan_id):
         logger.info("run_scheduled_scan: %s is inactive — skipping", scheduled_scan_id)
         return
 
-    scan = ScanResult.objects.create(
-        user          = scheduled.user,
-        organization  = scheduled.organization_id,
-        target        = scheduled.target,
-        scan_type     = scheduled.scan_type,
-        status        = ScanResult.Status.PENDING,
-        result        = "Scan queued (scheduled)...",
-    )
-    task = execute_scan.delay(scan.id, scheduled.target, scheduled.scan_type)
-    scan.celery_task_id = task.id
-    scan.save(update_fields=['celery_task_id'])
+    try:
+        authorize_target(scheduled.user, scheduled.organization, scheduled.target)
+    except TargetNotVerified as exc:
+        logger.warning("run_scheduled_scan: %s skipped, %s", scheduled_scan_id, exc.detail)
+        return
+
+    if scheduled.scan_type == 'full_recon':
+        # full_recon is a multi-tool session, not a single tool; run_scan()
+        # has no handler for it.
+        session = ReconSession.objects.create(
+            user            = scheduled.user,
+            organization_id = scheduled.organization_id,
+            target          = scheduled.target,
+            status          = ReconSession.Status.PENDING,
+        )
+        task = execute_full_recon.delay(session.id)
+        session.celery_task_id = task.id
+        session.save(update_fields=['celery_task_id'])
+        logger.info("Scheduled full recon fired | scheduled_scan=%s session=%s target=%s",
+                    scheduled_scan_id, session.id, scheduled.target)
+    else:
+        scan = ScanResult.objects.create(
+            user            = scheduled.user,
+            organization_id = scheduled.organization_id,
+            target          = scheduled.target,
+            scan_type       = scheduled.scan_type,
+            status          = ScanResult.Status.PENDING,
+            result          = "Scan queued (scheduled)...",
+        )
+        task = execute_scan.delay(scan.id, scheduled.target, scheduled.scan_type)
+        scan.celery_task_id = task.id
+        scan.save(update_fields=['celery_task_id'])
+        logger.info("Scheduled scan fired | scheduled_scan=%s scan=%s target=%s",
+                    scheduled_scan_id, scan.id, scheduled.target)
 
     scheduled.last_run_at = timezone.now()
     scheduled.save(update_fields=['last_run_at'])
-
-    logger.info("Scheduled scan fired | scheduled_scan=%s scan=%s target=%s",
-                scheduled_scan_id, scan.id, scheduled.target)
 
 
 # ─── Report generation task ────────────────────────────────────────────────────
@@ -218,21 +260,26 @@ def generate_report(self, session_id=None, scan_ids=None, report_id=None):
         # Get or create report record
         report, _ = ScanReport.objects.get_or_create(
             recon_session=session,
-            defaults={'user': user, 'target': target, 'status': ScanReport.Status.GENERATING}
+            defaults={'user': user, 'organization': session.organization,
+                      'target': target, 'status': ScanReport.Status.GENERATING}
         )
 
     elif scan_ids:
-        scans  = ScanResult.objects.filter(id__in=scan_ids, status='completed')
-        target = scans.first().target if scans.exists() else 'Unknown'
-        user   = scans.first().user   if scans.exists() else None
-
         if report_id:
             try:
                 report = ScanReport.objects.get(id=report_id)
             except ScanReport.DoesNotExist:
                 logger.error("generate_report: report %s not found", report_id)
                 return
+            # The report's own scan set was authorized when it was created;
+            # never trust raw ids passed alongside it.
+            scans  = report.scan_results.filter(status='completed')
+            target = report.target
+            user   = report.user
         else:
+            scans  = ScanResult.objects.filter(id__in=scan_ids, status='completed')
+            target = scans.first().target if scans.exists() else 'Unknown'
+            user   = scans.first().user   if scans.exists() else None
             report = ScanReport.objects.create(
                 user=user, target=target, status=ScanReport.Status.GENERATING
             )
@@ -291,7 +338,10 @@ def generate_report(self, session_id=None, scan_ids=None, report_id=None):
 
         # ── Suppression — apply false-positive / accepted-risk decisions ──
         from .suppression import apply_suppressions
-        suppression_stats = apply_suppressions(interpreted['findings'], target)
+        suppression_stats = apply_suppressions(
+            interpreted['findings'], target,
+            user=user, organization=report.organization,
+        )
         interpreted['suppression_stats'] = suppression_stats
 
         # Recalculate severity counts after dedup + suppression
@@ -424,3 +474,69 @@ def generate_report(self, session_id=None, scan_ids=None, report_id=None):
         report.error_message = str(exc)
         report.save(update_fields=['status', 'error_message'])
         return f"Report {report.id} failed: {str(exc)}"
+
+
+# ─── Verification expiry warnings ──────────────────────────────────────────────
+
+# "Days left" thresholds we warn at. 0 means it has already expired.
+EXPIRY_WARNING_DAYS = (14, 3, 0)
+
+
+def _expiry_recipients(target):
+    """Whoever owns the target, plus admins/owners of its organization."""
+    from .models import OrganizationMember
+
+    users = {target.user_id: target.user} if target.user_id else {}
+    if target.organization_id:
+        members = OrganizationMember.objects.filter(
+            organization_id=target.organization_id,
+            role__in=[OrganizationMember.Role.ADMIN, OrganizationMember.Role.OWNER],
+        ).select_related('user')
+        for m in members:
+            users.setdefault(m.user_id, m.user)
+    return sorted({u.email for u in users.values() if u and u.email})
+
+
+@shared_task
+def warn_expiring_verifications():
+    """
+    Daily: email about target verifications that are close to, or past, expiry.
+
+    Each threshold fires once per verification. If the task was down and
+    several thresholds were crossed, only the most urgent one is sent. Returns
+    the number of targets warned about.
+    """
+    from datetime import timedelta
+    from .models import Target
+    from .notifications import send_verification_expiry_email
+
+    if not getattr(settings, 'REQUIRE_TARGET_VERIFICATION', True):
+        return 0
+
+    ttl = timedelta(days=getattr(settings, 'TARGET_VERIFICATION_TTL_DAYS', 90))
+    now = timezone.now()
+    warned = 0
+
+    qs = (Target.objects.filter(verified_at__isnull=False)
+          .exclude(target_type=Target.TargetType.CIDR)
+          .select_related('user'))
+    for target in qs:
+        remaining = (target.verified_at + ttl) - now
+        crossed = [d for d in EXPIRY_WARNING_DAYS if remaining <= timedelta(days=d)]
+        if not crossed:
+            continue
+        threshold = min(crossed)
+        if target.expiry_notice_sent is not None and target.expiry_notice_sent <= threshold:
+            continue
+
+        # Report the real time left, not the threshold we crossed (they differ
+        # after a missed run).
+        days_left = 0 if remaining <= timedelta(0) else max(1, -(-int(remaining.total_seconds()) // 86400))
+        send_verification_expiry_email(target, _expiry_recipients(target), days_left)
+        target.expiry_notice_sent = threshold
+        target.save(update_fields=['expiry_notice_sent'])
+        warned += 1
+
+    if warned:
+        logger.info("Verification expiry: warned about %d target(s)", warned)
+    return warned

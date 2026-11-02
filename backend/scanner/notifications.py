@@ -9,6 +9,7 @@ from django.utils import timezone
 import requests as http_requests
 
 from .models import UserProfile, WebhookEndpoint
+from .netguard import UnsafeTarget, assert_public_url
 
 logger = logging.getLogger('scanner')
 
@@ -59,6 +60,32 @@ def send_report_ready_email(user, report):
         logger.warning("Failed to send email to %s: %s", user.email, str(e))
 
 
+def send_verification_expiry_email(target, recipients, days_left):
+    """Warn that a target's ownership verification is about to lapse (or has)."""
+    if days_left <= 0:
+        subject = f"[VulnSploit] Verification expired — {target.value}"
+        lead = (f"Ownership verification for {target.value} has expired. Scans and "
+                f"schedules for it are now blocked.")
+    else:
+        subject = (f"[VulnSploit] Verification expires in {days_left} "
+                   f"{'day' if days_left == 1 else 'days'} — {target.value}")
+        unit = 'day' if days_left == 1 else 'days'
+        lead = (f"Ownership verification for {target.value} will expire in "
+                f"{days_left} {unit}. After that, scans and schedules for it will be blocked.")
+    message = (
+        f"{lead}\n\n"
+        f"To renew, open Targets and press Verify again. If the DNS record or file "
+        f"is still in place it succeeds immediately.\n\n"
+        f"{settings.SITE_URL}/targets"
+    )
+    try:
+        send_mail(subject, message, settings.DEFAULT_FROM_EMAIL, list(recipients), fail_silently=True)
+        logger.info("Verification expiry notice sent for target %s (%s days) to %d recipient(s)",
+                    target.id, days_left, len(recipients))
+    except Exception as e:
+        logger.warning("Failed to send expiry notice for target %s: %s", target.id, str(e))
+
+
 # ─── Webhook delivery ──────────────────────────────────────────────────────────
 
 def _get_user_orgs_qs(user):
@@ -97,9 +124,17 @@ def _deliver_webhook(webhook, event, payload):
     elif 'discord.com/api/webhooks' in webhook.url:
         body = json.dumps({'content': _format_slack_message(event, payload)})
 
+    # The URL was validated when saved, but DNS may have changed since.
+    try:
+        assert_public_url(webhook.url)
+    except UnsafeTarget as exc:
+        logger.warning("Webhook %s skipped, unsafe URL: %s", webhook.id, str(exc))
+        return
+
     try:
         resp = http_requests.post(
             webhook.url, data=body, headers=headers, timeout=10,
+            allow_redirects=False,  # a redirect could bounce us to an internal host
         )
         if resp.status_code in (200, 204):
             logger.info("Webhook %s delivered: %s (HTTP %s)", webhook.id, event, resp.status_code)
